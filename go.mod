@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/google/go-containerregistry v0.21.4
+	github.com/spf13/cobra v1.10.2
 	oras.land/oras-go/v2 v2.6.0
 )
 
@@ -17,7 +18,6 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/vbatts/tar-split v0.12.2 // indirect
 	golang.org/x/sync v0.20.0 // indirect
