@@ -151,7 +151,3 @@ unpacker/
     ├── specs/                    Design document
     └── plans/                    Implementation plan
 ```
-
-## Pipeline
-
-The project builds as an OCI artifact container using Azure DevOps (`.pipelines/build-release.yaml`). The pipeline builds the container image and updates the allowlist with the new digest.
