@@ -33,11 +33,18 @@ func Pull(ctx context.Context, cfg *Config) error {
 	log.Printf("pulling %s with oras", cfg.Image)
 	if err := pullWithOras(ctx, cfg, tmpDir); err != nil {
 		log.Printf("oras failed (%v) — falling back to go-containerregistry", err)
-		return pullWithCrane(ctx, cfg, tmpDir)
+		if err := os.RemoveAll(tmpDir); err != nil {
+			return fmt.Errorf("clean partial oras output: %w", err)
+		}
+		return pullWithCrane(ctx, cfg)
 	}
 	return nil
 }
 
+// pullWithOras attempts to pull using oras-go. It does not set PlainHTTP or
+// TLS InsecureSkipVerify — plain-HTTP and self-signed-cert registries will
+// intentionally fail here and be handled by the crane fallback, which has
+// full insecure transport support when cfg.Insecure is true.
 func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	repo, err := orasremote.NewRepository(cfg.Image)
 	if err != nil {
@@ -88,11 +95,8 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	return os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644)
 }
 
-func pullWithCrane(ctx context.Context, cfg *Config, tmpDir string) error {
-	// clean up any partial oras output
-	if err := os.RemoveAll(tmpDir); err != nil {
-		return fmt.Errorf("clean tmp dir: %w", err)
-	}
+func pullWithCrane(ctx context.Context, cfg *Config) error {
+	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 
 	opts := []crane.Option{crane.WithContext(ctx)}
 
@@ -112,9 +116,11 @@ func pullWithCrane(ctx context.Context, cfg *Config, tmpDir string) error {
 			}))
 		case cfg.Creds.ConfigPath != "":
 			// go-containerregistry reads DOCKER_CONFIG pointing to the dir containing config.json
+			prev := os.Getenv("DOCKER_CONFIG")
 			if err := os.Setenv("DOCKER_CONFIG", filepath.Dir(cfg.Creds.ConfigPath)); err != nil {
 				return fmt.Errorf("set DOCKER_CONFIG: %w", err)
 			}
+			defer os.Setenv("DOCKER_CONFIG", prev) //nolint:errcheck // restore for test safety
 			opts = append(opts, crane.WithAuthFromKeychain(authn.DefaultKeychain))
 		}
 	}
