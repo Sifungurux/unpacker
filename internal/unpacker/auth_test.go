@@ -1,7 +1,6 @@
 package unpacker_test
 
 import (
-	"os"
 	"testing"
 
 	"github.com/energinet/unpacker/internal/unpacker"
@@ -41,8 +40,8 @@ func TestResolve_EnvVars(t *testing.T) {
 }
 
 func TestResolve_NoCreds_Error(t *testing.T) {
-	os.Unsetenv("USERNAME")
-	os.Unsetenv("PASSWORD")
+	t.Setenv("USERNAME", "")
+	t.Setenv("PASSWORD", "")
 
 	_, err := unpacker.Resolve("", false)
 	if err == nil {
