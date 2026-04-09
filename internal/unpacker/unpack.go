@@ -59,6 +59,8 @@ func Unpack(cfg *Config) error {
 				}
 			}
 		}
+	} else {
+		log.Printf("manifest.json not found, proceeding without mediatype information: %v", err)
 	}
 
 	blobsDir := filepath.Join(tmpDir, "blobs", "sha256")
@@ -66,7 +68,7 @@ func Unpack(cfg *Config) error {
 	hasBlobs := dirExists(blobsDir)
 
 	if hasTar || hasBlobs {
-		if useAllowedType && mediaType != "image" {
+		if useAllowedType {
 			return extractOrasArtifact(tmpDir, imageDir, digest)
 		}
 		return runUmoci(tmpDir, imageDir)
@@ -88,9 +90,9 @@ func firstFileIsTar(dir string) bool {
 		if err != nil {
 			return false
 		}
-		defer f.Close()
 		buf := make([]byte, 2)
 		n, _ := f.Read(buf)
+		f.Close()
 		return n == 2 && buf[0] == 0x1f && buf[1] == 0x8b
 	}
 	return false
@@ -111,6 +113,11 @@ func extractOrasArtifact(tmpDir, imageDir, digest string) error {
 	srcPath := filepath.Join(tmpDir, digest)
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
 		srcPath = filepath.Join(tmpDir, blobName)
+	}
+
+	cleanTmp := filepath.Clean(tmpDir) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(srcPath)+string(os.PathSeparator), cleanTmp) {
+		return fmt.Errorf("digest resolves outside tmp dir: %s", digest)
 	}
 
 	if err := os.MkdirAll(imageDir, 0755); err != nil {
@@ -180,7 +187,9 @@ func runUmoci(tmpDir, imageDir string) error {
 	if err != nil {
 		return fmt.Errorf("umoci failed: %w\n%s", err, out)
 	}
-	log.Printf("umoci: %s", out)
+	if len(out) > 0 {
+		log.Printf("umoci: %s", out)
+	}
 	return nil
 }
 
@@ -207,6 +216,11 @@ func CopyFiles(srcDir, destDir string) error {
 			return err
 		}
 		if _, err := io.Copy(dst, src); err != nil {
+			src.Close()
+			dst.Close()
+			return err
+		}
+		if err := dst.Sync(); err != nil {
 			src.Close()
 			dst.Close()
 			return err
