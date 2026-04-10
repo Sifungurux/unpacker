@@ -24,9 +24,10 @@ func rootCmd() *cobra.Command {
 	var insecure bool
 
 	cmd := &cobra.Command{
-		Use:   "unpacker IMAGE",
-		Short: "Pull and unpack OCI and Docker artifacts from a registry",
-		Args:  cobra.ExactArgs(1),
+		Use:     "unpacker IMAGE",
+		Short:   "Pull and unpack OCI and Docker artifacts from a registry",
+		Version: "0.1.0",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			image := args[0]
 

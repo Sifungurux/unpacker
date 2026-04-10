@@ -67,7 +67,15 @@ func Unpack(cfg *Config) error {
 	hasTar := firstFileIsTar(tmpDir)
 	hasBlobs := dirExists(blobsDir)
 
-	if hasTar || hasBlobs {
+	// hasTar: oras file store saved blob by annotated filename (e.g. chart-1.0.0.tgz)
+	// hasBlobs: OCI layout with blobs/sha256/ structure (crane output or oras with digest naming)
+	if hasTar {
+		if useAllowedType {
+			return extractFirstTar(tmpDir, imageDir)
+		}
+		return runUmoci(tmpDir, imageDir)
+	}
+	if hasBlobs {
 		if useAllowedType {
 			return extractOrasArtifact(tmpDir, imageDir, digest)
 		}
@@ -101,6 +109,25 @@ func firstFileIsTar(dir string) bool {
 func dirExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// extractFirstTar extracts the first regular file in tmpDir as a tar.gz.
+// Used when oras stores the blob under its annotated filename rather than by digest.
+func extractFirstTar(tmpDir, imageDir string) error {
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return fmt.Errorf("read tmp dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if err := os.MkdirAll(imageDir, 0755); err != nil {
+			return fmt.Errorf("create image dir: %w", err)
+		}
+		return ExtractTar(filepath.Join(tmpDir, e.Name()), imageDir)
+	}
+	return fmt.Errorf("no file found in tmp dir")
 }
 
 func extractOrasArtifact(tmpDir, imageDir, digest string) error {

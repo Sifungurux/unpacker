@@ -3,6 +3,7 @@ package unpacker
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -15,8 +16,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
-	oras "oras.land/oras-go/v2"
-	orasfile "oras.land/oras-go/v2/content/file"
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	orasremote "oras.land/oras-go/v2/registry/remote"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -41,10 +42,10 @@ func Pull(ctx context.Context, cfg *Config) error {
 	return nil
 }
 
-// pullWithOras attempts to pull using oras-go. It does not set PlainHTTP or
-// TLS InsecureSkipVerify — plain-HTTP and self-signed-cert registries will
-// intentionally fail here and be handled by the crane fallback, which has
-// full insecure transport support when cfg.Insecure is true.
+// pullWithOras fetches the manifest and each layer blob directly from the registry.
+// It does not set PlainHTTP or TLS InsecureSkipVerify — plain-HTTP and
+// self-signed-cert registries will intentionally fail here and be handled by
+// the crane fallback, which has full insecure transport support when cfg.Insecure is true.
 func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	repo, err := orasremote.NewRepository(cfg.Image)
 	if err != nil {
@@ -63,36 +64,79 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 		}
 	}
 
-	// parse tag from image reference
 	ref := "latest"
 	if idx := strings.LastIndex(cfg.Image, ":"); idx > strings.LastIndex(cfg.Image, "/") {
 		ref = cfg.Image[idx+1:]
 	}
 
-	store, err := orasfile.New(tmpDir)
-	if err != nil {
-		return fmt.Errorf("create file store: %w", err)
-	}
-	defer store.Close()
-
-	desc, err := oras.Copy(ctx, repo, ref, store, ref, oras.DefaultCopyOptions)
-	if err != nil {
-		return fmt.Errorf("oras copy: %w", err)
-	}
-
-	// fetch manifest and write manifest.json
-	manifestReader, err := repo.Fetch(ctx, desc)
+	// fetch manifest
+	_, manifestReader, err := repo.FetchReference(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("fetch manifest: %w", err)
 	}
-	defer manifestReader.Close()
-
 	manifestBytes, err := io.ReadAll(manifestReader)
+	manifestReader.Close()
 	if err != nil {
-		return fmt.Errorf("read manifest bytes: %w", err)
+		return fmt.Errorf("read manifest: %w", err)
 	}
 
-	return os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644)
+	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
+	}
+
+	// parse layers from manifest
+	var m struct {
+		Layers []struct {
+			MediaType   string            `json:"mediaType"`
+			Digest      string            `json:"digest"`
+			Size        int64             `json:"size"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(manifestBytes, &m); err != nil {
+		return fmt.Errorf("parse manifest: %w", err)
+	}
+
+	// fetch each layer blob directly and write to tmpDir
+	for _, layer := range m.Layers {
+		filename := layer.Annotations["org.opencontainers.image.title"]
+		if filename == "" {
+			// fall back to hex digest as filename
+			parts := strings.SplitN(layer.Digest, ":", 2)
+			if len(parts) == 2 {
+				filename = parts[1]
+			} else {
+				filename = layer.Digest
+			}
+		}
+
+		desc := ocispec.Descriptor{
+			MediaType: layer.MediaType,
+			Digest:    digest.Digest(layer.Digest),
+			Size:      layer.Size,
+		}
+
+		rc, err := repo.Fetch(ctx, desc)
+		if err != nil {
+			return fmt.Errorf("fetch layer %s: %w", layer.Digest, err)
+		}
+
+		destPath := filepath.Join(tmpDir, filename)
+		f, err := os.Create(destPath)
+		if err != nil {
+			rc.Close()
+			return fmt.Errorf("create blob file: %w", err)
+		}
+
+		_, copyErr := io.Copy(f, rc)
+		rc.Close()
+		f.Close()
+		if copyErr != nil {
+			return fmt.Errorf("write blob %s: %w", layer.Digest, copyErr)
+		}
+	}
+
+	return nil
 }
 
 func pullWithCrane(ctx context.Context, cfg *Config) error {
