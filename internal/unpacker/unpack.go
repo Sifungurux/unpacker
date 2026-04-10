@@ -180,6 +180,10 @@ func ExtractTar(tarPath, destDir string) error {
 		}
 
 		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
+		// skip the root directory entry (e.g. "./") — it resolves to destDir itself
+		if target == filepath.Clean(destDir) {
+			continue
+		}
 		if !strings.HasPrefix(target, cleanDest) {
 			return fmt.Errorf("illegal path in tar: %s", hdr.Name)
 		}
