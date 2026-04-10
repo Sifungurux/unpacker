@@ -52,6 +52,10 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 		return fmt.Errorf("parse image reference: %w", err)
 	}
 
+	if cfg.Insecure {
+		repo.PlainHTTP = true
+	}
+
 	if cfg.Creds != nil && cfg.Creds.Username != "" {
 		registry := strings.SplitN(cfg.Image, "/", 2)[0]
 		repo.Client = &orasauth.Client{
@@ -70,7 +74,7 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	}
 
 	// fetch manifest
-	_, manifestReader, err := repo.FetchReference(ctx, ref)
+	desc, manifestReader, err := repo.FetchReference(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("fetch manifest: %w", err)
 	}
@@ -78,6 +82,12 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	manifestReader.Close()
 	if err != nil {
 		return fmt.Errorf("read manifest: %w", err)
+	}
+
+	// Docker manifests must go through crane (writes OCI layout for umoci).
+	// Return an error here so Pull() falls back to pullWithCrane.
+	if strings.HasPrefix(desc.MediaType, "application/vnd.docker.") {
+		return fmt.Errorf("docker manifest type %q — use crane fallback", desc.MediaType)
 	}
 
 	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644); err != nil {
@@ -174,12 +184,15 @@ func pullWithCrane(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("crane pull: %w", err)
 	}
 
-	// write as OCI layout so umoci can unpack it
+	// write as OCI layout so umoci can unpack it.
+	// tag annotation is required so umoci can resolve the image by name.
 	p, err := layout.Write(tmpDir, empty.Index)
 	if err != nil {
 		return fmt.Errorf("create OCI layout: %w", err)
 	}
-	if err := p.AppendImage(img); err != nil {
+	if err := p.AppendImage(img, layout.WithAnnotations(map[string]string{
+		"org.opencontainers.image.ref.name": "latest",
+	})); err != nil {
 		return fmt.Errorf("append image to layout: %w", err)
 	}
 
