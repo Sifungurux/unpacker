@@ -10,6 +10,10 @@ import (
 	"github.com/energinet/unpacker/internal/unpacker"
 )
 
+// version is set via -ldflags "-X main.version=..." by goreleaser at release
+// build time; it stays "dev" for local `go build`.
+var version = "dev"
+
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		os.Exit(1)
@@ -26,7 +30,7 @@ func rootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "unpacker IMAGE",
 		Short:   "Pull and unpack OCI and Docker artifacts from a registry",
-		Version: "0.1.0",
+		Version: version,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			image := args[0]

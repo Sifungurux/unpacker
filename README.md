@@ -129,6 +129,16 @@ The Dockerfile uses a two-stage build:
 
 The umoci checksum is verified against the release's own `umoci.sha256sum` file. To upgrade umoci, change `UMOCI_VERSION` in the Dockerfile — no separate hash update needed.
 
+### Releasing
+
+Pushing a tag matching `v*` (e.g. `v0.2.0`) triggers `.github/workflows/release.yml`, which runs the test suite and then [goreleaser](https://goreleaser.com) (config in `.goreleaser.yaml`) to build binaries for linux/darwin, amd64/arm64, and publish them as a GitHub Release with checksums and a changelog. `unpacker --version` reports the tag it was built from.
+
+To dry-run the release build locally:
+
+```bash
+goreleaser release --snapshot --clean
+```
+
 ## Testing
 
 ### Unit tests
