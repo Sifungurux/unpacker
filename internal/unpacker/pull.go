@@ -14,8 +14,11 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/partial"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	orasremote "oras.land/oras-go/v2/registry/remote"
@@ -183,6 +186,7 @@ func pullWithCrane(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("crane pull: %w", err)
 	}
+	img = ociImage{img}
 
 	// write as OCI layout so umoci can unpack it.
 	// tag annotation is required so umoci can resolve the image by name.
@@ -202,4 +206,57 @@ func pullWithCrane(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("get manifest: %w", err)
 	}
 	return os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), rawManifest, 0644)
+}
+
+// ociImage wraps a v1.Image so its manifest always declares OCI media types
+// for itself, its config, and its layers — regardless of what the source
+// registry served. umoci (invoked by runUmoci in unpack.go) rejects any
+// manifest/config/layer descriptor whose mediaType isn't the OCI one, and
+// registries serving old Docker schema2 manifests (application/vnd.docker.*)
+// fail that check even though the underlying blob bytes are byte-identical
+// to their OCI counterparts. Relabeling here is therefore sufficient — no
+// blob content is rewritten.
+type ociImage struct {
+	v1.Image
+}
+
+func (o ociImage) MediaType() (types.MediaType, error) {
+	return types.OCIManifestSchema1, nil
+}
+
+func (o ociImage) RawManifest() ([]byte, error) {
+	b, err := o.Image.RawManifest()
+	if err != nil {
+		return nil, err
+	}
+	var m v1.Manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("parse manifest: %w", err)
+	}
+	m.MediaType = types.OCIManifestSchema1
+	m.Config.MediaType = types.OCIConfigJSON
+	for i := range m.Layers {
+		m.Layers[i].MediaType = ociLayerMediaType(m.Layers[i].MediaType)
+	}
+	return json.Marshal(&m)
+}
+
+func (o ociImage) Manifest() (*v1.Manifest, error) { return partial.Manifest(o) }
+func (o ociImage) Digest() (v1.Hash, error)        { return partial.Digest(o) }
+func (o ociImage) Size() (int64, error)            { return partial.Size(o) }
+
+// ociLayerMediaType maps a Docker layer media type to its OCI equivalent.
+// Anything else (already OCI, or a type we don't recognize) passes through
+// unchanged.
+func ociLayerMediaType(mt types.MediaType) types.MediaType {
+	switch mt {
+	case types.DockerLayer:
+		return types.OCILayer
+	case types.DockerUncompressedLayer:
+		return types.OCIUncompressedLayer
+	case types.DockerForeignLayer:
+		return types.OCIRestrictedLayer
+	default:
+		return mt
+	}
 }
