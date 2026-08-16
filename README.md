@@ -18,8 +18,19 @@ Options:
   -c, --config       string    Path to dockerconfig.json for auth
   -p, --public                 Pull from a public registry (no auth required)
   -k, --insecure               Skip TLS verification / allow plain HTTP registries
+      --max-total-bytes  int    Max total bytes written per archive (default: 1 GiB)
+      --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
+      --max-entries      int    Max entries in an archive (default: 100000)
   -v, --version                Print version
   -h, --help                   Show help
+```
+
+### Extraction limits
+
+A `.tar.gz` says nothing trustworthy about how far it expands, so when an artifact is extracted as a tarball the extraction is bounded by what is actually written to disk rather than by the sizes the archive declares. (These limits apply to the tar path; the umoci and plain-file-copy paths are not covered by them.) Exceeding any limit fails the run with an error naming the flag involved, and setuid/setgid/sticky bits are stripped from every extracted file so an archive cannot plant a privileged binary. Raise a limit when an artifact is legitimately larger:
+
+```bash
+unpacker --public --max-total-bytes $((4 * 1024 * 1024 * 1024)) --output-dir ./output ghcr.io/myorg/big-artifact:v1
 ```
 
 ### Examples
