@@ -151,14 +151,14 @@ Unit tests use an in-process OCI registry. No external dependencies required.
 
 ### Integration tests
 
-Requires Docker with the `unpacker:dev` image already built.
-
 ```bash
-docker build -t unpacker:dev .
+docker build -t unpacker:dev .   # only needed for the container suite
 ./scripts/test-integration.sh
 ```
 
-The integration test suite runs four scenarios:
+The script runs two suites. Each is **skipped, not failed**, when its prerequisites are missing, so it is useful on a machine with no Docker daemon.
+
+**Container suite** — needs a running Docker daemon and the `unpacker:dev` image. Exercises the published container end to end:
 
 | Test | What it covers |
 |---|---|
@@ -167,11 +167,21 @@ The integration test suite runs four scenarios:
 | Self-created OCI artifact (local registry, plain HTTP) | oras + `--insecure` → tar extraction |
 | Single-file OCI artifact with content verification | oras → file copy, exact content check |
 
-The local registry tests spin up a `registry:2` container and push artifacts using the oras CLI container (`ghcr.io/oras-project/oras:v1.3.0`). Everything is cleaned up on exit.
+These spin up a `registry:2` container and push with the oras CLI container (`ghcr.io/oras-project/oras:v1.3.0`).
 
-To test a different image tag:
+**Media-type suite** — needs `go`, `flux`, `helm`, `umoci` and `curl`; no daemon. Builds `unpacker` from source and pushes artifacts produced by the real CLIs to a local registry (`go-containerregistry`'s `cmd/registry`, pinned to the version in `go.mod`), covering how `Unpack()` routes each media type:
+
+| Test | What it covers |
+|---|---|
+| Flux artifact (`flux push artifact`) | `application/vnd.cncf.flux.content.v1.tar+gzip` → tar extraction, extracted file compared byte-for-byte with the pushed one |
+| Helm chart (`helm push`) | `application/vnd.cncf.helm.chart.content.v1.tar+gzip` → tar extraction, `Chart.yaml` verified |
+| Media type outside `--mediatype` | the same Flux artifact pulled with only `helm` allowed must fall through to umoci and be **refused**, leaving no `image/` — proves the allowlist gates rather than passes everything |
+
+Everything is cleaned up on exit. Both suites are configurable:
+
 ```bash
-IMAGE=unpacker:latest ./scripts/test-integration.sh
+IMAGE=unpacker:latest ./scripts/test-integration.sh   # container suite image
+REGISTRY_PORT=5200 ./scripts/test-integration.sh      # media-type suite registry port
 ```
 
 ## Dependencies
