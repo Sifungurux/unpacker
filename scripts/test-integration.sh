@@ -3,7 +3,7 @@
 #
 # Two suites, each skipped (not failed) when its prerequisites are missing:
 #
-#   Container suite  — needs a running Docker daemon and the unpacker:dev image.
+#   Container suite  — needs docker or podman plus the unpacker:dev image.
 #                      Covers the published container end to end.
 #   Media-type suite — needs go, flux, helm and umoci; no daemon. Pushes real
 #                      Flux and Helm artifacts to a local registry and checks
@@ -13,6 +13,7 @@
 #   ./scripts/test-integration.sh
 #   IMAGE=unpacker:latest ./scripts/test-integration.sh
 #   REGISTRY_PORT=5200 ./scripts/test-integration.sh
+#   ENGINE=podman ./scripts/test-integration.sh
 
 set -euo pipefail
 
@@ -20,24 +21,34 @@ IMAGE="${IMAGE:-unpacker:dev}"
 REGISTRY_PORT="${REGISTRY_PORT:-5111}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Engine the caller asked for, if any; the one actually in use is resolved below.
+ENGINE_REQUESTED="${ENGINE:-}"
+ENGINE=""
+
+# Fully qualified so podman never has to resolve a short name (it may prompt,
+# or resolve against a different registry than docker would).
+ALPINE_IMAGE="docker.io/library/alpine:3.21"
+REGISTRY_IMAGE="docker.io/library/registry:2"
+ORAS_IMAGE="ghcr.io/oras-project/oras:v1.3.0"
+
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 skip() { echo "SKIP: $*"; echo ""; }
 
 # Resources cleaned up on exit; each is only set once actually created.
 REGISTRY_PID=""
-DOCKER_REGISTRY=""
-DOCKER_NETWORK=""
-DOCKER_ARTIFACT_VOL=""
+CTR_REGISTRY=""
+CTR_NETWORK=""
+CTR_ARTIFACT_VOL=""
 WORKDIR=""
 
 cleanup() {
   if [ -n "$REGISTRY_PID" ]; then
     { kill "$REGISTRY_PID" && wait "$REGISTRY_PID"; } 2>/dev/null || true
   fi
-  if [ -n "$DOCKER_REGISTRY" ]; then docker rm -f "$DOCKER_REGISTRY" >/dev/null 2>&1 || true; fi
-  if [ -n "$DOCKER_NETWORK" ]; then docker network rm "$DOCKER_NETWORK" >/dev/null 2>&1 || true; fi
-  if [ -n "$DOCKER_ARTIFACT_VOL" ]; then docker volume rm "$DOCKER_ARTIFACT_VOL" >/dev/null 2>&1 || true; fi
+  if [ -n "$ENGINE" ] && [ -n "$CTR_REGISTRY" ]; then "$ENGINE" rm -f "$CTR_REGISTRY" >/dev/null 2>&1 || true; fi
+  if [ -n "$ENGINE" ] && [ -n "$CTR_NETWORK" ]; then "$ENGINE" network rm "$CTR_NETWORK" >/dev/null 2>&1 || true; fi
+  if [ -n "$ENGINE" ] && [ -n "$CTR_ARTIFACT_VOL" ]; then "$ENGINE" volume rm "$CTR_ARTIFACT_VOL" >/dev/null 2>&1 || true; fi
   if [ -n "$WORKDIR" ]; then rm -rf "$WORKDIR"; fi
 }
 trap cleanup EXIT
@@ -53,7 +64,7 @@ missing_tools() {
 }
 
 # ---------------------------------------------------------------------------
-# Container suite — pulls through the published image, needs a Docker daemon
+# Container suite — pulls through the published image, needs docker or podman
 # ---------------------------------------------------------------------------
 
 run_test() {
@@ -67,11 +78,11 @@ run_test() {
 
   # Named volume avoids macOS bind-mount permission issues (non-root container user)
   local volume="unpacker-test-$$-${RANDOM}"
-  docker volume create "$volume" > /dev/null
+  "$ENGINE" volume create "$volume" > /dev/null
   # Volume is owned by root by default — open it up for the non-root container user
-  docker run --rm -v "$volume:/out" alpine chmod 777 /out
+  "$ENGINE" run --rm -v "$volume:/out" "$ALPINE_IMAGE" chmod 777 /out
 
-  docker run --rm \
+  "$ENGINE" run --rm \
     -v "$volume:/out" \
     "$IMAGE" \
     --public \
@@ -80,9 +91,9 @@ run_test() {
     "$artifact"
 
   local file_count
-  file_count=$(docker run --rm -v "$volume:/out" alpine sh -c 'find /out/image -type f 2>/dev/null | wc -l' | tr -d ' ')
+  file_count=$("$ENGINE" run --rm -v "$volume:/out" "$ALPINE_IMAGE" sh -c 'find /out/image -type f 2>/dev/null | wc -l' | tr -d ' ')
 
-  docker volume rm "$volume" > /dev/null
+  "$ENGINE" volume rm "$volume" > /dev/null
 
   if [ "$file_count" -eq 0 ]; then
     fail "$name — image/ directory is empty or was not created"
@@ -109,19 +120,19 @@ container_suite() {
 
   # Test 3: Self-created OCI artifact — local registry, plain HTTP, oras path
   echo "==> Test: Self-created OCI artifact (local registry)"
-  DOCKER_NETWORK="unpacker-net-$$"
-  DOCKER_REGISTRY="unpacker-registry-$$"
-  DOCKER_ARTIFACT_VOL="unpacker-artifact-$$"
+  CTR_NETWORK="unpacker-net-$$"
+  CTR_REGISTRY="unpacker-registry-$$"
+  CTR_ARTIFACT_VOL="unpacker-artifact-$$"
 
-  docker network create "$DOCKER_NETWORK" > /dev/null
-  docker volume create "$DOCKER_ARTIFACT_VOL" > /dev/null
-  docker run -d --name "$DOCKER_REGISTRY" --network "$DOCKER_NETWORK" registry:2 > /dev/null
+  "$ENGINE" network create "$CTR_NETWORK" > /dev/null
+  "$ENGINE" volume create "$CTR_ARTIFACT_VOL" > /dev/null
+  "$ENGINE" run -d --name "$CTR_REGISTRY" --network "$CTR_NETWORK" "$REGISTRY_IMAGE" > /dev/null
 
   # Wait for registry to be ready
   sleep 1
 
   # Build a simple tar.gz artifact: two text files
-  docker run --rm -v "$DOCKER_ARTIFACT_VOL:/workspace" alpine sh -c "
+  "$ENGINE" run --rm -v "$CTR_ARTIFACT_VOL:/workspace" "$ALPINE_IMAGE" sh -c "
     mkdir -p /workspace/content && \
     echo 'hello from OCI artifact' > /workspace/content/hello.txt && \
     echo 'second file' > /workspace/content/world.txt && \
@@ -129,34 +140,34 @@ container_suite() {
   "
 
   # Push the artifact to the local registry using the oras CLI container
-  docker run --rm \
-    --network "$DOCKER_NETWORK" \
-    -v "$DOCKER_ARTIFACT_VOL:/workspace" \
+  "$ENGINE" run --rm \
+    --network "$CTR_NETWORK" \
+    -v "$CTR_ARTIFACT_VOL:/workspace" \
     --workdir /workspace \
-    ghcr.io/oras-project/oras:v1.3.0 \
-    push "${DOCKER_REGISTRY}:5000/test/artifact:v1" \
+    "$ORAS_IMAGE" \
+    push "${CTR_REGISTRY}:5000/test/artifact:v1" \
     --plain-http \
     artifact.tgz:application/vnd.cncf.flux.content.v1.tar+gzip
 
-  echo "    Artifact: ${DOCKER_REGISTRY}:5000/test/artifact:v1"
+  echo "    Artifact: ${CTR_REGISTRY}:5000/test/artifact:v1"
 
   # Pull and unpack via unpacker (--insecure for plain HTTP)
   local oci_volume="unpacker-test-$$-${RANDOM}"
-  docker volume create "$oci_volume" > /dev/null
-  docker run --rm -v "$oci_volume:/out" alpine chmod 777 /out
+  "$ENGINE" volume create "$oci_volume" > /dev/null
+  "$ENGINE" run --rm -v "$oci_volume:/out" "$ALPINE_IMAGE" chmod 777 /out
 
-  docker run --rm \
-    --network "$DOCKER_NETWORK" \
+  "$ENGINE" run --rm \
+    --network "$CTR_NETWORK" \
     -v "$oci_volume:/out" \
     "$IMAGE" \
     --public \
     --insecure \
     --output-dir /out \
-    "${DOCKER_REGISTRY}:5000/test/artifact:v1"
+    "${CTR_REGISTRY}:5000/test/artifact:v1"
 
   local file_count
-  file_count=$(docker run --rm -v "$oci_volume:/out" alpine sh -c 'find /out/image -type f 2>/dev/null | wc -l' | tr -d ' ')
-  docker volume rm "$oci_volume" > /dev/null
+  file_count=$("$ENGINE" run --rm -v "$oci_volume:/out" "$ALPINE_IMAGE" sh -c 'find /out/image -type f 2>/dev/null | wc -l' | tr -d ' ')
+  "$ENGINE" volume rm "$oci_volume" > /dev/null
 
   if [ "$file_count" -eq 0 ]; then
     fail "Self-created OCI artifact — image/ directory is empty or was not created"
@@ -169,43 +180,43 @@ container_suite() {
 
   local expected_content="hello from unpacker content test"
   local single_vol="unpacker-single-$$"
-  docker volume create "$single_vol" > /dev/null
+  "$ENGINE" volume create "$single_vol" > /dev/null
 
   # Create the file
-  docker run --rm -v "$single_vol:/workspace" alpine \
+  "$ENGINE" run --rm -v "$single_vol:/workspace" "$ALPINE_IMAGE" \
     sh -c "printf '%s' '$expected_content' > /workspace/message.txt"
 
   # Push as a plain-file OCI artifact (no tar — exercises CopyFiles path)
-  docker run --rm \
-    --network "$DOCKER_NETWORK" \
+  "$ENGINE" run --rm \
+    --network "$CTR_NETWORK" \
     -v "$single_vol:/workspace" \
     --workdir /workspace \
-    ghcr.io/oras-project/oras:v1.3.0 \
-    push "${DOCKER_REGISTRY}:5000/test/single-file:v1" \
+    "$ORAS_IMAGE" \
+    push "${CTR_REGISTRY}:5000/test/single-file:v1" \
     --plain-http \
     message.txt:text/plain
 
-  docker volume rm "$single_vol" > /dev/null
-  echo "    Artifact: ${DOCKER_REGISTRY}:5000/test/single-file:v1"
+  "$ENGINE" volume rm "$single_vol" > /dev/null
+  echo "    Artifact: ${CTR_REGISTRY}:5000/test/single-file:v1"
 
   # Pull and unpack
   local single_out_vol="unpacker-single-out-$$"
-  docker volume create "$single_out_vol" > /dev/null
-  docker run --rm -v "$single_out_vol:/out" alpine chmod 777 /out
+  "$ENGINE" volume create "$single_out_vol" > /dev/null
+  "$ENGINE" run --rm -v "$single_out_vol:/out" "$ALPINE_IMAGE" chmod 777 /out
 
-  docker run --rm \
-    --network "$DOCKER_NETWORK" \
+  "$ENGINE" run --rm \
+    --network "$CTR_NETWORK" \
     -v "$single_out_vol:/out" \
     "$IMAGE" \
     --public \
     --insecure \
     --output-dir /out \
-    "${DOCKER_REGISTRY}:5000/test/single-file:v1"
+    "${CTR_REGISTRY}:5000/test/single-file:v1"
 
   # Verify filename exists and content matches
   local actual
-  actual=$(docker run --rm -v "$single_out_vol:/out" alpine cat /out/image/message.txt 2>/dev/null)
-  docker volume rm "$single_out_vol" > /dev/null
+  actual=$("$ENGINE" run --rm -v "$single_out_vol:/out" "$ALPINE_IMAGE" cat /out/image/message.txt 2>/dev/null)
+  "$ENGINE" volume rm "$single_out_vol" > /dev/null
 
   if [ "$actual" != "$expected_content" ]; then
     fail "Single-file OCI artifact — content mismatch\n  expected: '$expected_content'\n  got:      '$actual'"
@@ -349,15 +360,31 @@ EOF
 
 # ---------------------------------------------------------------------------
 
+# Pick a container engine: whatever ENGINE names, else the first one whose
+# daemon actually answers. Having the docker CLI installed proves nothing —
+# on a podman host it is usually present but pointed at a socket that is not
+# there.
+pick_engine() {
+  local candidate
+  for candidate in ${ENGINE_REQUESTED:-docker podman}; do
+    if have "$candidate" && "$candidate" info > /dev/null 2>&1; then
+      ENGINE="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 ran_any=0
 
-if ! have docker; then
-  skip "Container suite — docker not installed"
-elif ! docker info > /dev/null 2>&1; then
-  skip "Container suite — docker daemon not reachable (start Docker and re-run)"
-else
+if pick_engine; then
+  echo "Container engine: $ENGINE"
   container_suite
   ran_any=1
+elif [ -n "$ENGINE_REQUESTED" ]; then
+  skip "Container suite — '$ENGINE_REQUESTED' is not usable (is it installed and running?)"
+else
+  skip "Container suite — no usable container engine (start Docker or podman)"
 fi
 
 missing=$(missing_tools go flux helm umoci curl)
@@ -369,7 +396,7 @@ else
 fi
 
 if [ "$ran_any" -eq 0 ]; then
-  fail "No suite could run — install Docker, or go + flux + helm + umoci"
+  fail "No suite could run — start docker or podman, or install go + flux + helm + umoci"
 fi
 
 echo "All tests passed."
