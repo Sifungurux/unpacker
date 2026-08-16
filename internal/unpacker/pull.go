@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"oras.land/oras-go/v2/content"
 	orasremote "oras.land/oras-go/v2/registry/remote"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -81,10 +82,13 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	if err != nil {
 		return fmt.Errorf("fetch manifest: %w", err)
 	}
-	manifestBytes, err := io.ReadAll(manifestReader)
+	// content.ReadAll hashes the body as it reads and rejects it unless the
+	// bytes match desc.Digest and desc.Size. Without this the registry could
+	// serve any manifest it liked for the requested tag.
+	manifestBytes, err := content.ReadAll(manifestReader, desc)
 	manifestReader.Close()
 	if err != nil {
-		return fmt.Errorf("read manifest: %w", err)
+		return fmt.Errorf("read manifest %s: %w", desc.Digest, err)
 	}
 
 	// Docker manifests must go through crane (writes OCI layout for umoci).
@@ -141,11 +145,26 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 			return fmt.Errorf("create blob file: %w", err)
 		}
 
-		_, copyErr := io.Copy(f, rc)
+		// VerifyReader hashes the blob as io.Copy drains it; Verify() then
+		// compares that hash and the byte count against the manifest's
+		// descriptor. A mismatch means the file on disk is not the blob the
+		// manifest named, so it must not survive.
+		vr := content.NewVerifyReader(rc, desc)
+		_, copyErr := io.Copy(f, vr)
+		if copyErr == nil {
+			// must run before rc.Close(): Verify() peeks the body for
+			// trailing bytes beyond the descriptor's declared size.
+			copyErr = vr.Verify()
+		}
 		rc.Close()
-		f.Close()
+		if closeErr := f.Close(); copyErr == nil {
+			// a failed flush leaves a short file that hashed fine in flight
+			copyErr = closeErr
+		}
 		if copyErr != nil {
-			return fmt.Errorf("write blob %s: %w", layer.Digest, copyErr)
+			os.Remove(destPath) //nolint:errcheck // already returning an error
+			return fmt.Errorf("blob %s (%s) failed verification against manifest digest: %w",
+				filename, layer.Digest, copyErr)
 		}
 	}
 
