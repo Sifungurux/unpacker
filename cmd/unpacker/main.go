@@ -26,6 +26,7 @@ func rootCmd() *cobra.Command {
 	var configPath string
 	var public bool
 	var insecure bool
+	var withReferrers bool
 	var maxTotalBytes int64
 	var maxFileBytes int64
 	var maxEntries int
@@ -44,11 +45,12 @@ func rootCmd() *cobra.Command {
 			}
 
 			cfg := &unpacker.Config{
-				Image:        image,
-				OutputDir:    outputDir,
-				AllowedTypes: mediatypes,
-				Insecure:     insecure,
-				Creds:        creds,
+				Image:         image,
+				OutputDir:     outputDir,
+				AllowedTypes:  mediatypes,
+				Insecure:      insecure,
+				WithReferrers: withReferrers,
+				Creds:         creds,
 				Limits: unpacker.Limits{
 					MaxTotalBytes: maxTotalBytes,
 					MaxFileBytes:  maxFileBytes,
@@ -56,12 +58,21 @@ func rootCmd() *cobra.Command {
 				},
 			}
 
-			if err := unpacker.Pull(context.Background(), cfg); err != nil {
+			ctx := context.Background()
+
+			resolved, err := unpacker.Pull(ctx, cfg)
+			if err != nil {
 				return fmt.Errorf("pull: %w", err)
 			}
 
 			if err := unpacker.Unpack(cfg); err != nil {
 				return fmt.Errorf("unpack: %w", err)
+			}
+
+			if withReferrers {
+				if _, err := unpacker.FetchReferrers(ctx, cfg, resolved); err != nil {
+					return fmt.Errorf("referrers: %w", err)
+				}
 			}
 
 			return nil
@@ -73,6 +84,8 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to dockerconfig.json for auth")
 	cmd.Flags().BoolVarP(&public, "public", "p", false, "Pull from a public registry (no auth required)")
 	cmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS verification (self-signed certs)")
+	cmd.Flags().BoolVar(&withReferrers, "with-referrers", false,
+		"Download artifacts attached to the image (SBOMs, attestations, signatures) and write result.json")
 	cmd.Flags().Int64Var(&maxTotalBytes, "max-total-bytes", unpacker.DefaultMaxTotalBytes,
 		"Maximum total bytes written when extracting an archive")
 	cmd.Flags().Int64Var(&maxFileBytes, "max-file-bytes", unpacker.DefaultMaxFileBytes,

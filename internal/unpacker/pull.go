@@ -30,48 +30,47 @@ import (
 
 // Pull pulls the image to <outputDir>/tmp/ and writes <outputDir>/manifest.json.
 // It tries oras-go first (OCI artifacts), then falls back to go-containerregistry (Docker images).
-func Pull(ctx context.Context, cfg *Config) error {
+//
+// It returns the digest the registry resolved the reference to. That is the
+// digest referrers are attached to, and for the crane path it is deliberately
+// the digest as served — not the digest of the media-type-normalised manifest
+// written to the OCI layout, which no registry knows about.
+func Pull(ctx context.Context, cfg *Config) (string, error) {
 	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return fmt.Errorf("create tmp dir: %w", err)
+		return "", fmt.Errorf("create tmp dir: %w", err)
 	}
 
 	log.Printf("pulling %s with oras", cfg.Image)
-	orasErr := pullWithOras(ctx, cfg, tmpDir)
+	orasDigest, orasErr := pullWithOras(ctx, cfg, tmpDir)
 	if orasErr == nil {
-		return nil
+		return orasDigest, nil
 	}
 
 	log.Printf("oras failed (%v) — falling back to go-containerregistry", orasErr)
 	if err := os.RemoveAll(tmpDir); err != nil {
-		return fmt.Errorf("clean partial oras output: %w", err)
+		return "", fmt.Errorf("clean partial oras output: %w", err)
 	}
-	craneErr := pullWithCrane(ctx, cfg)
+	craneDigest, craneErr := pullWithCrane(ctx, cfg)
 	switch {
 	case craneErr == nil:
-		return nil
+		return craneDigest, nil
 	case errors.Is(orasErr, errUseCraneFallback):
 		// oras declined on purpose; it has nothing to say about the failure
-		return craneErr
+		return "", craneErr
 	default:
 		// crane's error describes its own attempt, which can hide why the
 		// first one failed — e.g. a digest mismatch reported as a pull error.
-		return fmt.Errorf("oras: %w; crane fallback: %w", orasErr, craneErr)
+		return "", fmt.Errorf("oras: %w; crane fallback: %w", orasErr, craneErr)
 	}
 }
 
-// errUseCraneFallback marks the expected "this isn't an OCI artifact" exit from
-// pullWithOras, as opposed to a real failure worth reporting alongside crane's.
-var errUseCraneFallback = errors.New("not an OCI artifact")
-
-// pullWithOras fetches the manifest and each layer blob directly from the registry.
-// It does not set PlainHTTP or TLS InsecureSkipVerify — plain-HTTP and
-// self-signed-cert registries will intentionally fail here and be handled by
-// the crane fallback, which has full insecure transport support when cfg.Insecure is true.
-func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
+// newOrasRepository builds a repository client for cfg, shared by the pull and
+// referrers paths so both authenticate and speak the same transport.
+func newOrasRepository(cfg *Config) (*orasremote.Repository, error) {
 	repo, err := orasremote.NewRepository(cfg.Image)
 	if err != nil {
-		return fmt.Errorf("parse image reference: %w", err)
+		return nil, fmt.Errorf("parse image reference: %w", err)
 	}
 
 	if cfg.Insecure {
@@ -89,6 +88,60 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 			}),
 		}
 	}
+	return repo, nil
+}
+
+// fetchBlobToFile writes the blob described by desc to destPath, hashing it in
+// flight and refusing to leave a file behind unless it matches desc.
+func fetchBlobToFile(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor, destPath string) error {
+	rc, err := fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return fmt.Errorf("fetch blob %s: %w", desc.Digest, err)
+	}
+
+	f, err := os.Create(destPath)
+	if err != nil {
+		rc.Close()
+		return fmt.Errorf("create blob file: %w", err)
+	}
+
+	// VerifyReader hashes the blob as io.Copy drains it; Verify() then
+	// compares that hash and the byte count against the descriptor. A
+	// mismatch means the file on disk is not the blob that was named, so it
+	// must not survive.
+	vr := content.NewVerifyReader(rc, desc)
+	_, copyErr := io.Copy(f, vr)
+	if copyErr == nil {
+		// must run before rc.Close(): Verify() peeks the body for
+		// trailing bytes beyond the descriptor's declared size.
+		copyErr = vr.Verify()
+	}
+	rc.Close()
+	if closeErr := f.Close(); copyErr == nil {
+		// a failed flush leaves a short file that hashed fine in flight
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		os.Remove(destPath) //nolint:errcheck // already returning an error
+		return fmt.Errorf("blob %s (%s) failed verification against its declared digest: %w",
+			filepath.Base(destPath), desc.Digest, copyErr)
+	}
+	return nil
+}
+
+// errUseCraneFallback marks the expected "this isn't an OCI artifact" exit from
+// pullWithOras, as opposed to a real failure worth reporting alongside crane's.
+var errUseCraneFallback = errors.New("not an OCI artifact")
+
+// pullWithOras fetches the manifest and each layer blob directly from the registry.
+// It does not set PlainHTTP or TLS InsecureSkipVerify — plain-HTTP and
+// self-signed-cert registries will intentionally fail here and be handled by
+// the crane fallback, which has full insecure transport support when cfg.Insecure is true.
+func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) (string, error) {
+	repo, err := newOrasRepository(cfg)
+	if err != nil {
+		return "", err
+	}
 
 	ref := "latest"
 	if idx := strings.LastIndex(cfg.Image, ":"); idx > strings.LastIndex(cfg.Image, "/") {
@@ -98,7 +151,7 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	// fetch manifest
 	desc, manifestReader, err := repo.FetchReference(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("fetch manifest: %w", err)
+		return "", fmt.Errorf("fetch manifest: %w", err)
 	}
 	// content.ReadAll hashes the body as it reads and rejects it unless the
 	// bytes match desc.Digest and desc.Size. Without this the registry could
@@ -106,17 +159,17 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	manifestBytes, err := content.ReadAll(manifestReader, desc)
 	manifestReader.Close()
 	if err != nil {
-		return fmt.Errorf("read manifest %s: %w", desc.Digest, err)
+		return "", fmt.Errorf("read manifest %s: %w", desc.Digest, err)
 	}
 
 	// Docker manifests must go through crane (writes OCI layout for umoci).
 	// Return an error here so Pull() falls back to pullWithCrane.
 	if strings.HasPrefix(desc.MediaType, "application/vnd.docker.") {
-		return fmt.Errorf("docker manifest type %q: %w", desc.MediaType, errUseCraneFallback)
+		return "", fmt.Errorf("docker manifest type %q: %w", desc.MediaType, errUseCraneFallback)
 	}
 
 	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644); err != nil {
-		return fmt.Errorf("write manifest.json: %w", err)
+		return "", fmt.Errorf("write manifest.json: %w", err)
 	}
 
 	// parse layers from manifest
@@ -129,7 +182,7 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 		} `json:"layers"`
 	}
 	if err := json.Unmarshal(manifestBytes, &m); err != nil {
-		return fmt.Errorf("parse manifest: %w", err)
+		return "", fmt.Errorf("parse manifest: %w", err)
 	}
 
 	// fetch each layer blob directly and write to tmpDir
@@ -145,51 +198,22 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 			}
 		}
 
-		desc := ocispec.Descriptor{
+		layerDesc := ocispec.Descriptor{
 			MediaType: layer.MediaType,
 			Digest:    digest.Digest(layer.Digest),
 			Size:      layer.Size,
 		}
 
-		rc, err := repo.Fetch(ctx, desc)
-		if err != nil {
-			return fmt.Errorf("fetch layer %s: %w", layer.Digest, err)
-		}
-
-		destPath := filepath.Join(tmpDir, filename)
-		f, err := os.Create(destPath)
-		if err != nil {
-			rc.Close()
-			return fmt.Errorf("create blob file: %w", err)
-		}
-
-		// VerifyReader hashes the blob as io.Copy drains it; Verify() then
-		// compares that hash and the byte count against the manifest's
-		// descriptor. A mismatch means the file on disk is not the blob the
-		// manifest named, so it must not survive.
-		vr := content.NewVerifyReader(rc, desc)
-		_, copyErr := io.Copy(f, vr)
-		if copyErr == nil {
-			// must run before rc.Close(): Verify() peeks the body for
-			// trailing bytes beyond the descriptor's declared size.
-			copyErr = vr.Verify()
-		}
-		rc.Close()
-		if closeErr := f.Close(); copyErr == nil {
-			// a failed flush leaves a short file that hashed fine in flight
-			copyErr = closeErr
-		}
-		if copyErr != nil {
-			os.Remove(destPath) //nolint:errcheck // already returning an error
-			return fmt.Errorf("blob %s (%s) failed verification against manifest digest: %w",
-				filename, layer.Digest, copyErr)
+		if err := fetchBlobToFile(ctx, repo, layerDesc, filepath.Join(tmpDir, filename)); err != nil {
+			return "", err
 		}
 	}
 
-	return nil
+	// desc is the manifest descriptor: the digest referrers attach to
+	return desc.Digest.String(), nil
 }
 
-func pullWithCrane(ctx context.Context, cfg *Config) error {
+func pullWithCrane(ctx context.Context, cfg *Config) (string, error) {
 	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 
 	opts := []crane.Option{crane.WithContext(ctx)}
@@ -212,7 +236,7 @@ func pullWithCrane(ctx context.Context, cfg *Config) error {
 			// go-containerregistry reads DOCKER_CONFIG pointing to the dir containing config.json
 			prev := os.Getenv("DOCKER_CONFIG")
 			if err := os.Setenv("DOCKER_CONFIG", filepath.Dir(cfg.Creds.ConfigPath)); err != nil {
-				return fmt.Errorf("set DOCKER_CONFIG: %w", err)
+				return "", fmt.Errorf("set DOCKER_CONFIG: %w", err)
 			}
 			defer os.Setenv("DOCKER_CONFIG", prev) //nolint:errcheck // restore for test safety
 			opts = append(opts, crane.WithAuthFromKeychain(authn.DefaultKeychain))
@@ -221,7 +245,13 @@ func pullWithCrane(ctx context.Context, cfg *Config) error {
 
 	img, err := crane.Pull(cfg.Image, opts...)
 	if err != nil {
-		return fmt.Errorf("crane pull: %w", err)
+		return "", fmt.Errorf("crane pull: %w", err)
+	}
+	// Taken before the OCI relabelling below, which changes the manifest bytes
+	// and so its digest: referrers hang off the digest the registry serves.
+	servedDigest, err := img.Digest()
+	if err != nil {
+		return "", fmt.Errorf("resolve image digest: %w", err)
 	}
 	img = ociImage{img}
 
@@ -229,20 +259,23 @@ func pullWithCrane(ctx context.Context, cfg *Config) error {
 	// tag annotation is required so umoci can resolve the image by name.
 	p, err := layout.Write(tmpDir, empty.Index)
 	if err != nil {
-		return fmt.Errorf("create OCI layout: %w", err)
+		return "", fmt.Errorf("create OCI layout: %w", err)
 	}
 	if err := p.AppendImage(img, layout.WithAnnotations(map[string]string{
 		"org.opencontainers.image.ref.name": "latest",
 	})); err != nil {
-		return fmt.Errorf("append image to layout: %w", err)
+		return "", fmt.Errorf("append image to layout: %w", err)
 	}
 
 	// write manifest.json from the image manifest
 	rawManifest, err := img.RawManifest()
 	if err != nil {
-		return fmt.Errorf("get manifest: %w", err)
+		return "", fmt.Errorf("get manifest: %w", err)
 	}
-	return os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), rawManifest, 0644)
+	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), rawManifest, 0644); err != nil {
+		return "", err
+	}
+	return servedDigest.String(), nil
 }
 
 // ociImage wraps a v1.Image so its manifest always declares OCI media types

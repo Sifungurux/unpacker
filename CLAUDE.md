@@ -13,7 +13,7 @@ unpacker -o <output-dir> -m <mediatype> -c <dockerconfig.json> IMAGE
 unpacker --public --output-dir ./output ghcr.io/stefanprodan/charts/podinfo:6.7.1
 ```
 
-Flags: `-o/--output-dir`, `-m/--mediatype` (repeatable, default flux+helm), `-c/--config`, `-p/--public`, `-k/--insecure`, `--max-total-bytes` (1GiB), `--max-file-bytes` (512MiB), `--max-entries` (100k).
+Flags: `-o/--output-dir`, `-m/--mediatype` (repeatable, default flux+helm), `-c/--config`, `-p/--public`, `-k/--insecure`, `--max-total-bytes` (1GiB), `--max-file-bytes` (512MiB), `--max-entries` (100k), `--with-referrers`.
 
 ## Testing
 
@@ -26,8 +26,14 @@ go test ./...                   # unit tests, in-process registry, no external d
 
 **After merging a PR, check out the target branch, pull, and run the tests there** — then report the result. A branch that was green on its own can still break `main`: something else landed in between, the rebase resolved differently, or the image the integration suite tests was never rebuilt. Run the integration suite too when the change touches pull or unpack behavior.
 
+## Output
+
+`<output-dir>/`: `manifest.json` (pulled manifest), `tmp/` (raw blobs or OCI layout), `image/` (unpacked artifact), and with `--with-referrers` also `referrers/<artifact-type>/<digest>/` plus `result.json`.
+
 ## Key Facts
 
 - This is the Go successor to the Python CLI in `../artifact-unpack` (same problem space, different implementation) — confirm with the user which one is the deployed/maintained version before extending either
 - `-k/--insecure` skips TLS verification — never default this on, it's meant for local/dev registries only
 - Extraction limits apply to the tar path only; `runUmoci` and `CopyFiles` are not bounded by them
+- `Pull` returns the digest **as the registry served it** — for the crane path that is deliberately not the digest of the normalised manifest written to the OCI layout, because referrers attach to the served one
+- A registry without the referrers API is a no-op, not an error: oras falls back to the referrers tag schema and an absent tag yields an empty list with no error
