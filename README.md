@@ -18,12 +18,49 @@ Options:
   -c, --config       string    Path to dockerconfig.json for auth
   -p, --public                 Pull from a public registry (no auth required)
   -k, --insecure               Skip TLS verification / allow plain HTTP registries
+      --with-referrers         Download artifacts attached to the image and write result.json
       --max-total-bytes  int    Max total bytes written per archive (default: 1 GiB)
       --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
       --max-entries      int    Max entries in an archive (default: 100000)
   -v, --version                Print version
   -h, --help                   Show help
 ```
+
+### Attached artifacts (`--with-referrers`)
+
+After the pull, unpacker asks the registry's [OCI 1.1 referrers API](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers) what is attached to the digest it resolved — SBOMs, in-toto attestations, cosign signatures — and downloads each one:
+
+```
+<output-dir>/
+├── referrers/
+│   └── <artifact-type>/<referrer-digest>/
+│       ├── manifest.json      the referrer's own manifest
+│       └── <payload>          each layer, named by its title annotation
+└── result.json                what was resolved and what was downloaded
+```
+
+```bash
+unpacker --public --with-referrers --output-dir ./output ghcr.io/myorg/app:v1
+```
+
+```json
+{
+  "image": "ghcr.io/myorg/app:v1",
+  "digest": "sha256:b7df…",
+  "referrers": [
+    {
+      "artifactType": "application/spdx+json",
+      "digest": "sha256:09a8…",
+      "path": "referrers/application-spdx-json/09a8…",
+      "files": ["manifest.json", "sbom.spdx.json"]
+    }
+  ]
+}
+```
+
+Registries that predate OCI 1.1 are **a no-op, not a failure**: unpacker logs that nothing was found and still writes `result.json` with an empty list, so a consumer can tell "asked and found none" apart from "never asked". A referrer that *is* advertised but cannot be fetched or fails digest verification **is** fatal — the command exits non-zero after the main artifact has already been unpacked, so treat a non-zero exit with `image/` populated as "the artifact is there, its attachments are not". Artifact types and title annotations come from the registry, so both are reduced to a single safe path element before anything is written.
+
+For the crane fallback path the subject is the digest **as the registry served it**, not the digest of the media-type-normalised manifest written to the OCI layout — referrers hang off the former.
 
 ### Extraction limits
 

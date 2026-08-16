@@ -54,7 +54,7 @@ func TestPull_CraneFallback_WritesOCILayout(t *testing.T) {
 		Creds:     &unpacker.Credentials{Public: true},
 	}
 
-	if err := unpacker.Pull(context.Background(), cfg); err != nil {
+	if _, err := unpacker.Pull(context.Background(), cfg); err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
 
@@ -103,8 +103,21 @@ func TestPull_CraneFallback_ConvertsDockerManifestToOCI(t *testing.T) {
 		Creds:     &unpacker.Credentials{Public: true},
 	}
 
-	if err := unpacker.Pull(context.Background(), cfg); err != nil {
+	resolved, err := unpacker.Pull(context.Background(), cfg)
+	if err != nil {
 		t.Fatalf("Pull: %v", err)
+	}
+
+	// The digest Pull reports has to be the one the registry serves — that is
+	// what referrers attach to. This fallback rewrites the manifest's media
+	// types, which changes its bytes and therefore its digest, so returning
+	// the normalised digest instead would be silently wrong.
+	served, err := crane.Digest(image, crane.Insecure)
+	if err != nil {
+		t.Fatalf("crane.Digest: %v", err)
+	}
+	if resolved != served {
+		t.Errorf("Pull returned digest %q, want the digest the registry serves %q", resolved, served)
 	}
 
 	// index.json's manifest descriptor must declare the OCI manifest media type.
@@ -126,6 +139,9 @@ func TestPull_CraneFallback_ConvertsDockerManifestToOCI(t *testing.T) {
 	}
 	if got := index.Manifests[0].MediaType; got != string(types.OCIManifestSchema1) {
 		t.Errorf("index.json manifest mediaType = %q, want %q", got, types.OCIManifestSchema1)
+	}
+	if resolved == index.Manifests[0].Digest {
+		t.Errorf("Pull returned the normalised on-disk digest %q; the registry serves a different one", resolved)
 	}
 
 	// The manifest blob itself must declare OCI media types throughout.
@@ -188,7 +204,7 @@ func TestPull_ManifestWritten(t *testing.T) {
 		Creds:     &unpacker.Credentials{Public: true},
 	}
 
-	if err := unpacker.Pull(context.Background(), cfg); err != nil {
+	if _, err := unpacker.Pull(context.Background(), cfg); err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
 
