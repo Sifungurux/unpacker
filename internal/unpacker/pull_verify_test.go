@@ -138,10 +138,18 @@ func TestPullWithOras_CorruptedBlobRejected(t *testing.T) {
 		t.Errorf("expected no files in tmp/ after rejection, got %v", entries)
 	}
 
-	// Pull() falls back to crane when oras fails, so check the corrupt blob
-	// does not sneak through that path either (crane reports its own error).
-	if err := Pull(context.Background(), cfg); err == nil {
-		t.Error("Pull accepted a corrupted blob via the crane fallback")
+	// Pull() falls back to crane when oras fails. The corrupt blob must not
+	// sneak through that path, and crane's own error must not bury the reason
+	// the first attempt failed.
+	pullErr := Pull(context.Background(), cfg)
+	if pullErr == nil {
+		t.Fatal("Pull accepted a corrupted blob via the crane fallback")
+	}
+	if !errors.Is(pullErr, content.ErrMismatchedDigest) {
+		t.Errorf("Pull error = %v, want the oras digest mismatch preserved", pullErr)
+	}
+	if !strings.Contains(pullErr.Error(), "crane fallback") {
+		t.Errorf("Pull error = %q, want the crane failure reported too", pullErr)
 	}
 }
 
