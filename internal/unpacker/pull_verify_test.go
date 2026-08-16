@@ -29,9 +29,9 @@ const testBlobContent = "fake content"
 // Blob responses advertise "Accept-Ranges: bytes" like GHCR and Docker Hub do;
 // oras hands back a different reader implementation for those, and that reader's
 // end-of-body behaviour is what the verification depends on.
-func startOCIRegistry(t *testing.T, corruptPath string) string {
+func startOCIRegistry(t *testing.T, corruptPath string, opts ...registry.Option) string {
 	t.Helper()
-	inner := registry.New()
+	inner := registry.New(opts...)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isBlobGet := r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/blobs/sha256:")
 		corrupt := corruptPath != "" && r.Method == http.MethodGet && strings.Contains(r.URL.Path, corruptPath)
@@ -94,7 +94,7 @@ func TestPullWithOras_VerifiesGoodBlob(t *testing.T) {
 	addr := startOCIRegistry(t, "")
 	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/ociartifact"))
 
-	if err := pullWithOras(context.Background(), cfg, tmpDir); err != nil {
+	if _, err := pullWithOras(context.Background(), cfg, tmpDir); err != nil {
 		t.Fatalf("pullWithOras: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestPullWithOras_CorruptedBlobRejected(t *testing.T) {
 	addr := startOCIRegistry(t, "/blobs/sha256:")
 	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/corruptblob"))
 
-	err := pullWithOras(context.Background(), cfg, tmpDir)
+	_, err := pullWithOras(context.Background(), cfg, tmpDir)
 	if err == nil {
 		t.Fatal("pullWithOras accepted a blob that does not match its manifest digest")
 	}
@@ -141,7 +141,7 @@ func TestPullWithOras_CorruptedBlobRejected(t *testing.T) {
 	// Pull() falls back to crane when oras fails. The corrupt blob must not
 	// sneak through that path, and crane's own error must not bury the reason
 	// the first attempt failed.
-	pullErr := Pull(context.Background(), cfg)
+	_, pullErr := Pull(context.Background(), cfg)
 	if pullErr == nil {
 		t.Fatal("Pull accepted a corrupted blob via the crane fallback")
 	}
@@ -157,7 +157,7 @@ func TestPullWithOras_CorruptedManifestRejected(t *testing.T) {
 	addr := startOCIRegistry(t, "/manifests/")
 	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/corruptmanifest"))
 
-	err := pullWithOras(context.Background(), cfg, tmpDir)
+	_, err := pullWithOras(context.Background(), cfg, tmpDir)
 	if err == nil {
 		t.Fatal("pullWithOras accepted a manifest that does not match its digest")
 	}

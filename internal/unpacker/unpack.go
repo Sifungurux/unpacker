@@ -15,11 +15,12 @@ import (
 
 // Config holds all runtime configuration passed from the CLI.
 type Config struct {
-	Image        string
-	OutputDir    string
-	AllowedTypes []string
-	Insecure     bool
-	Creds        *Credentials
+	Image         string
+	OutputDir     string
+	AllowedTypes  []string
+	Insecure      bool
+	WithReferrers bool
+	Creds         *Credentials
 	Limits
 }
 
