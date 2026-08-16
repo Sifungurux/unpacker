@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,15 +37,32 @@ func Pull(ctx context.Context, cfg *Config) error {
 	}
 
 	log.Printf("pulling %s with oras", cfg.Image)
-	if err := pullWithOras(ctx, cfg, tmpDir); err != nil {
-		log.Printf("oras failed (%v) — falling back to go-containerregistry", err)
-		if err := os.RemoveAll(tmpDir); err != nil {
-			return fmt.Errorf("clean partial oras output: %w", err)
-		}
-		return pullWithCrane(ctx, cfg)
+	orasErr := pullWithOras(ctx, cfg, tmpDir)
+	if orasErr == nil {
+		return nil
 	}
-	return nil
+
+	log.Printf("oras failed (%v) — falling back to go-containerregistry", orasErr)
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("clean partial oras output: %w", err)
+	}
+	craneErr := pullWithCrane(ctx, cfg)
+	switch {
+	case craneErr == nil:
+		return nil
+	case errors.Is(orasErr, errUseCraneFallback):
+		// oras declined on purpose; it has nothing to say about the failure
+		return craneErr
+	default:
+		// crane's error describes its own attempt, which can hide why the
+		// first one failed — e.g. a digest mismatch reported as a pull error.
+		return fmt.Errorf("oras: %w; crane fallback: %w", orasErr, craneErr)
+	}
 }
+
+// errUseCraneFallback marks the expected "this isn't an OCI artifact" exit from
+// pullWithOras, as opposed to a real failure worth reporting alongside crane's.
+var errUseCraneFallback = errors.New("not an OCI artifact")
 
 // pullWithOras fetches the manifest and each layer blob directly from the registry.
 // It does not set PlainHTTP or TLS InsecureSkipVerify — plain-HTTP and
@@ -94,7 +112,7 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) error {
 	// Docker manifests must go through crane (writes OCI layout for umoci).
 	// Return an error here so Pull() falls back to pullWithCrane.
 	if strings.HasPrefix(desc.MediaType, "application/vnd.docker.") {
-		return fmt.Errorf("docker manifest type %q — use crane fallback", desc.MediaType)
+		return fmt.Errorf("docker manifest type %q: %w", desc.MediaType, errUseCraneFallback)
 	}
 
 	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644); err != nil {
