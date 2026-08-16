@@ -20,6 +20,39 @@ type Config struct {
 	AllowedTypes []string
 	Insecure     bool
 	Creds        *Credentials
+	Limits
+}
+
+// Default extraction limits. A tar.gz says nothing trustworthy about how much
+// it expands to, so extraction is bounded by what is actually written rather
+// than by any header the archive declares.
+const (
+	DefaultMaxTotalBytes int64 = 1 << 30   // 1 GiB
+	DefaultMaxFileBytes  int64 = 512 << 20 // 512 MiB
+	DefaultMaxEntries    int   = 100_000
+)
+
+// Limits bounds what one archive may expand to on disk.
+type Limits struct {
+	MaxTotalBytes int64
+	MaxFileBytes  int64
+	MaxEntries    int
+}
+
+// withDefaults fills in any unset field. Zero and negative both mean "not
+// configured" and resolve to the default — these are a safety control, so an
+// unset value must never mean unlimited.
+func (l Limits) withDefaults() Limits {
+	if l.MaxTotalBytes <= 0 {
+		l.MaxTotalBytes = DefaultMaxTotalBytes
+	}
+	if l.MaxFileBytes <= 0 {
+		l.MaxFileBytes = DefaultMaxFileBytes
+	}
+	if l.MaxEntries <= 0 {
+		l.MaxEntries = DefaultMaxEntries
+	}
+	return l
 }
 
 type manifest struct {
@@ -71,13 +104,13 @@ func Unpack(cfg *Config) error {
 	// hasBlobs: OCI layout with blobs/sha256/ structure (crane output or oras with digest naming)
 	if hasTar {
 		if useAllowedType {
-			return extractFirstTar(tmpDir, imageDir)
+			return extractFirstTar(tmpDir, imageDir, cfg.Limits)
 		}
 		return runUmoci(tmpDir, imageDir)
 	}
 	if hasBlobs {
 		if useAllowedType {
-			return extractOrasArtifact(tmpDir, imageDir, digest)
+			return extractOrasArtifact(tmpDir, imageDir, digest, cfg.Limits)
 		}
 		return runUmoci(tmpDir, imageDir)
 	}
@@ -113,7 +146,7 @@ func dirExists(path string) bool {
 
 // extractFirstTar extracts the first regular file in tmpDir as a tar.gz.
 // Used when oras stores the blob under its annotated filename rather than by digest.
-func extractFirstTar(tmpDir, imageDir string) error {
+func extractFirstTar(tmpDir, imageDir string, lim Limits) error {
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
 		return fmt.Errorf("read tmp dir: %w", err)
@@ -125,12 +158,12 @@ func extractFirstTar(tmpDir, imageDir string) error {
 		if err := os.MkdirAll(imageDir, 0755); err != nil {
 			return fmt.Errorf("create image dir: %w", err)
 		}
-		return ExtractTar(filepath.Join(tmpDir, e.Name()), imageDir)
+		return ExtractTar(filepath.Join(tmpDir, e.Name()), imageDir, lim)
 	}
 	return fmt.Errorf("no file found in tmp dir")
 }
 
-func extractOrasArtifact(tmpDir, imageDir, digest string) error {
+func extractOrasArtifact(tmpDir, imageDir, digest string, lim Limits) error {
 	parts := strings.SplitN(digest, ":", 2)
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid digest format: %s", digest)
@@ -150,11 +183,11 @@ func extractOrasArtifact(tmpDir, imageDir, digest string) error {
 	if err := os.MkdirAll(imageDir, 0755); err != nil {
 		return fmt.Errorf("create image dir: %w", err)
 	}
-	return ExtractTar(srcPath, imageDir)
+	return ExtractTar(srcPath, imageDir, lim)
 }
 
-// ExtractTar extracts a .tar.gz file to destDir. Exported for testing.
-func ExtractTar(tarPath, destDir string) error {
+// ExtractTar extracts a .tar.gz file to destDir, bounded by lim. Exported for testing.
+func ExtractTar(tarPath, destDir string, lim Limits) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("open tar: %w", err)
@@ -169,6 +202,10 @@ func ExtractTar(tarPath, destDir string) error {
 
 	tr := tar.NewReader(gz)
 	cleanDest := filepath.Clean(destDir) + string(os.PathSeparator)
+	lim = lim.withDefaults()
+
+	var entries int
+	var total int64
 
 	for {
 		hdr, err := tr.Next()
@@ -177,6 +214,11 @@ func ExtractTar(tarPath, destDir string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
+		}
+
+		entries++
+		if entries > lim.MaxEntries {
+			return fmt.Errorf("archive has more than %d entries (--max-entries)", lim.MaxEntries)
 		}
 
 		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
@@ -188,24 +230,45 @@ func ExtractTar(tarPath, destDir string) error {
 			return fmt.Errorf("illegal path in tar: %s", hdr.Name)
 		}
 
+		// Perm() keeps only the 0777 bits, dropping setuid/setgid/sticky:
+		// an archive must not be able to plant a privileged binary.
+		mode := hdr.FileInfo().Mode().Perm()
+
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, hdr.FileInfo().Mode()); err != nil {
+			if err := os.MkdirAll(target, mode); err != nil {
 				return err
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return err
 			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode())
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(out, tr); err != nil {
-				out.Close()
-				return err
+			// Read one byte past whichever limit binds first, so an
+			// over-large entry is detected without writing it out in full.
+			// hdr.Size is not consulted: it is attacker-controlled, and only
+			// the bytes actually written bound what lands on disk.
+			allowed := lim.MaxFileBytes
+			if remaining := lim.MaxTotalBytes - total; remaining < allowed {
+				allowed = remaining
 			}
+			n, copyErr := io.Copy(out, io.LimitReader(tr, allowed+1))
 			out.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			switch {
+			case n > lim.MaxFileBytes:
+				return fmt.Errorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
+					hdr.Name, lim.MaxFileBytes)
+			case total+n > lim.MaxTotalBytes:
+				return fmt.Errorf("archive expands past the %d byte total limit (--max-total-bytes)",
+					lim.MaxTotalBytes)
+			}
+			total += n
 		}
 	}
 	return nil
