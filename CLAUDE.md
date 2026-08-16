@@ -13,7 +13,7 @@ unpacker -o <output-dir> -m <mediatype> -c <dockerconfig.json> IMAGE
 unpacker --public --output-dir ./output ghcr.io/stefanprodan/charts/podinfo:6.7.1
 ```
 
-Flags: `-o/--output-dir`, `-m/--mediatype` (repeatable, default flux+helm), `-c/--config`, `-p/--public`, `-k/--insecure`.
+Flags: `-o/--output-dir`, `-m/--mediatype` (repeatable, default flux+helm), `-c/--config`, `-p/--public`, `-k/--insecure`, `--max-total-bytes` (1GiB), `--max-file-bytes` (512MiB), `--max-entries` (100k).
 
 ## Key Facts
 

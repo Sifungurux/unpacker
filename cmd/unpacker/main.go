@@ -26,6 +26,9 @@ func rootCmd() *cobra.Command {
 	var configPath string
 	var public bool
 	var insecure bool
+	var maxTotalBytes int64
+	var maxFileBytes int64
+	var maxEntries int
 
 	cmd := &cobra.Command{
 		Use:     "unpacker IMAGE",
@@ -46,6 +49,11 @@ func rootCmd() *cobra.Command {
 				AllowedTypes: mediatypes,
 				Insecure:     insecure,
 				Creds:        creds,
+				Limits: unpacker.Limits{
+					MaxTotalBytes: maxTotalBytes,
+					MaxFileBytes:  maxFileBytes,
+					MaxEntries:    maxEntries,
+				},
 			}
 
 			if err := unpacker.Pull(context.Background(), cfg); err != nil {
@@ -65,6 +73,12 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to dockerconfig.json for auth")
 	cmd.Flags().BoolVarP(&public, "public", "p", false, "Pull from a public registry (no auth required)")
 	cmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS verification (self-signed certs)")
+	cmd.Flags().Int64Var(&maxTotalBytes, "max-total-bytes", unpacker.DefaultMaxTotalBytes,
+		"Maximum total bytes written when extracting an archive")
+	cmd.Flags().Int64Var(&maxFileBytes, "max-file-bytes", unpacker.DefaultMaxFileBytes,
+		"Maximum bytes written for a single file in an archive")
+	cmd.Flags().IntVar(&maxEntries, "max-entries", unpacker.DefaultMaxEntries,
+		"Maximum number of entries in an archive")
 
 	return cmd
 }
