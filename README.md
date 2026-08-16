@@ -152,13 +152,13 @@ Unit tests use an in-process OCI registry. No external dependencies required.
 ### Integration tests
 
 ```bash
-docker build -t unpacker:dev .   # only needed for the container suite
+docker build -t unpacker:dev .   # or: podman build -t unpacker:dev .
 ./scripts/test-integration.sh
 ```
 
-The script runs two suites. Each is **skipped, not failed**, when its prerequisites are missing, so it is useful on a machine with no Docker daemon.
+The script runs two suites. Each is **skipped, not failed**, when its prerequisites are missing, so it is useful on a machine with no container engine at all.
 
-**Container suite** — needs a running Docker daemon and the `unpacker:dev` image. Exercises the published container end to end:
+**Container suite** — needs docker or podman (whichever daemon actually answers; override with `ENGINE=podman`) and the `unpacker:dev` image. Exercises the published container end to end:
 
 | Test | What it covers |
 |---|---|
@@ -181,6 +181,7 @@ Everything is cleaned up on exit. Both suites are configurable:
 
 ```bash
 IMAGE=unpacker:latest ./scripts/test-integration.sh   # container suite image
+ENGINE=podman ./scripts/test-integration.sh           # force a container engine
 REGISTRY_PORT=5200 ./scripts/test-integration.sh      # media-type suite registry port
 ```
 
