@@ -250,13 +250,10 @@ func pullWithCrane(ctx context.Context, cfg *Config) (string, error) {
 				Password: cfg.Creds.Password,
 			}))
 		case cfg.Creds.ConfigPath != "":
-			// go-containerregistry reads DOCKER_CONFIG pointing to the dir containing config.json
-			prev := os.Getenv("DOCKER_CONFIG")
-			if err := os.Setenv("DOCKER_CONFIG", filepath.Dir(cfg.Creds.ConfigPath)); err != nil {
-				return "", fmt.Errorf("set DOCKER_CONFIG: %w", err)
-			}
-			defer os.Setenv("DOCKER_CONFIG", prev) //nolint:errcheck // restore for test safety
-			opts = append(opts, crane.WithAuthFromKeychain(authn.DefaultKeychain))
+			// Reads the file directly rather than pointing DOCKER_CONFIG at it:
+			// that was process-wide state in a library, unsafe under concurrent
+			// use and visible to everything else sharing the process.
+			opts = append(opts, crane.WithAuthFromKeychain(configFileKeychain{path: cfg.Creds.ConfigPath}))
 		}
 	}
 
