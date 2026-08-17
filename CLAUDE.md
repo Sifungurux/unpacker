@@ -38,6 +38,7 @@ References may be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...` — or
 - `-k/--insecure` skips TLS verification — never default this on, it's meant for local/dev registries only. It does **not** by itself permit credentials over plain HTTP; that needs `--insecure-allow-credentials`
 - Credentials: `UNPACKER_USERNAME`/`UNPACKER_PASSWORD` (the unprefixed `USERNAME`/`PASSWORD` still work but warn — Windows and many CI images set them)
 - `--mediatype` matches a full media type exactly, or a bare word against a whole component of it — not a raw substring
+- Layer compression (gzip / zstd / uncompressed tar) is detected from the bytes, not the media type suffix
 - Extraction limits apply to the tar and copy paths; only `runUmoci` is unbounded by them. `--max-total-bytes` is shared across a multi-layer artifact's layers, not applied per layer
 - `Unpack` extracts **every** layer whose media type matches, in manifest order (later layers overwrite earlier) — extracting only the first silently loses content
 - `Pull` returns the digest **as the registry served it** — for the crane path that is deliberately not the digest of the normalised manifest written to the OCI layout, because referrers attach to the served one
