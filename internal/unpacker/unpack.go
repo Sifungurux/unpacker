@@ -105,6 +105,9 @@ func Unpack(cfg *Config) error {
 
 func unpackInto(cfg *Config, imageDir string) error {
 	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
+	// Resolved once here; everything below takes limits that are already
+	// defaulted, so no inner step can re-apply them to a running budget.
+	lim := cfg.Limits.withDefaults()
 
 	var allowed []layer
 
@@ -134,7 +137,7 @@ func unpackInto(cfg *Config, imageDir string) error {
 	// hasBlobs: OCI layout with blobs/sha256/ structure (crane output or oras with digest naming)
 	if hasTar || hasBlobs {
 		if len(allowed) > 0 {
-			return extractLayers(tmpDir, imageDir, allowed, cfg.Limits)
+			return extractLayers(tmpDir, imageDir, allowed, lim)
 		}
 		return runUmoci(tmpDir, imageDir)
 	}
@@ -185,13 +188,14 @@ func mediaTypeComponents(mediaType string) []string {
 
 // extractLayers extracts every allowed layer into imageDir in manifest order,
 // so a later layer overwrites an earlier one exactly as an image would.
+// lim must already be resolved by withDefaults.
 func extractLayers(tmpDir, imageDir string, layers []layer, lim Limits) error {
 	if err := os.MkdirAll(imageDir, 0755); err != nil {
 		return fmt.Errorf("create image dir: %w", err)
 	}
 	// The byte budget is shared across layers: --max-total-bytes bounds what
 	// the artifact expands to, not what each of its layers does.
-	budget := lim.withDefaults()
+	budget := lim
 	for _, l := range layers {
 		src, err := blobPath(tmpDir, l)
 		if err != nil {
@@ -267,14 +271,16 @@ func dirExists(path string) bool {
 	return err == nil
 }
 
-// ExtractTar extracts a .tar.gz file to destDir, bounded by lim. Exported for testing.
+// ExtractTar extracts a .tar.gz file to destDir, bounded by lim. A zero-value
+// lim resolves to the defaults. Exported for testing.
 func ExtractTar(tarPath, destDir string, lim Limits) error {
-	_, err := extractTar(tarPath, destDir, lim)
+	_, err := extractTar(tarPath, destDir, lim.withDefaults())
 	return err
 }
 
 // extractTar is ExtractTar plus the number of bytes written, so a caller
-// extracting several layers can share one budget between them.
+// extracting several layers can share one budget between them. lim must
+// already be resolved by withDefaults.
 func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
@@ -290,7 +296,6 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 
 	tr := tar.NewReader(gz)
 	cleanDest := filepath.Clean(destDir) + string(os.PathSeparator)
-	lim = lim.withDefaults()
 
 	var entries int
 	var total int64
@@ -412,10 +417,4 @@ func CopyFiles(srcDir, destDir string) error {
 		log.Printf("copied %s", entry.Name())
 	}
 	return nil
-}
-
-// AllowedMediaTypeForTest exposes the --mediatype matching rule to the
-// external test package.
-func AllowedMediaTypeForTest(mediaType string, allowedTypes []string) bool {
-	return allowedMediaType(mediaType, allowedTypes)
 }

@@ -1,31 +1,19 @@
-package unpacker_test
+package unpacker
 
 import (
 	"context"
 	"encoding/json"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-
-	"github.com/energinet/unpacker/internal/unpacker"
 )
-
-// startTestRegistry spins up an in-process OCI registry and returns its address.
-func startTestRegistry(t *testing.T) string {
-	t.Helper()
-	srv := httptest.NewServer(registry.New())
-	t.Cleanup(srv.Close)
-	return srv.Listener.Addr().String()
-}
 
 // pushTestImage pushes a minimal image to the test registry and returns the full reference.
 func pushTestImage(t *testing.T, registryAddr, repo string) string {
@@ -43,18 +31,18 @@ func pushTestImage(t *testing.T, registryAddr, repo string) string {
 }
 
 func TestPull_CraneFallback_WritesOCILayout(t *testing.T) {
-	addr := startTestRegistry(t)
+	addr := startRegistry(t, "")
 	image := pushTestImage(t, addr, "test/myimage")
 
 	outputDir := t.TempDir()
-	cfg := &unpacker.Config{
+	cfg := &Config{
 		Image:     image,
 		OutputDir: outputDir,
 		Insecure:  true,
-		Creds:     &unpacker.Credentials{Public: true},
+		Creds:     &Credentials{Public: true},
 	}
 
-	if _, err := unpacker.Pull(context.Background(), cfg); err != nil {
+	if _, err := Pull(context.Background(), cfg); err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
 
@@ -92,18 +80,18 @@ func pushDockerSchema2Image(t *testing.T, registryAddr, repo string) string {
 // the manifest, config descriptor, and layer descriptors to their OCI
 // equivalents as part of the fallback.
 func TestPull_CraneFallback_ConvertsDockerManifestToOCI(t *testing.T) {
-	addr := startTestRegistry(t)
+	addr := startRegistry(t, "")
 	image := pushDockerSchema2Image(t, addr, "test/schema2image")
 
 	outputDir := t.TempDir()
-	cfg := &unpacker.Config{
+	cfg := &Config{
 		Image:     image,
 		OutputDir: outputDir,
 		Insecure:  true,
-		Creds:     &unpacker.Credentials{Public: true},
+		Creds:     &Credentials{Public: true},
 	}
 
-	resolved, err := unpacker.Pull(context.Background(), cfg)
+	resolved, err := Pull(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -193,18 +181,18 @@ func TestPull_CraneFallback_ConvertsDockerManifestToOCI(t *testing.T) {
 }
 
 func TestPull_ManifestWritten(t *testing.T) {
-	addr := startTestRegistry(t)
+	addr := startRegistry(t, "")
 	image := pushTestImage(t, addr, "test/artifact")
 
 	outputDir := t.TempDir()
-	cfg := &unpacker.Config{
+	cfg := &Config{
 		Image:     image,
 		OutputDir: outputDir,
 		Insecure:  true,
-		Creds:     &unpacker.Credentials{Public: true},
+		Creds:     &Credentials{Public: true},
 	}
 
-	if _, err := unpacker.Pull(context.Background(), cfg); err != nil {
+	if _, err := Pull(context.Background(), cfg); err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
 
