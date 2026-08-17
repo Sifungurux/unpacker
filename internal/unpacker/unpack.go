@@ -169,11 +169,21 @@ func extractOrasArtifact(tmpDir, imageDir, digest string, lim Limits) error {
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid digest format: %s", digest)
 	}
-	blobName := parts[1]
+	algo, blobName := parts[0], parts[1]
 
+	// The blob is named by its digest when oras pulled it, by its hex under
+	// blobs/<algo>/ when the crane fallback wrote an OCI layout. The layout
+	// case is reached whenever oras fails on an artifact whose media type is
+	// allowed — without it, extraction fails with a confusing "no such file".
 	srcPath := filepath.Join(tmpDir, digest)
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		srcPath = filepath.Join(tmpDir, blobName)
+	for _, candidate := range []string{
+		filepath.Join(tmpDir, blobName),
+		filepath.Join(tmpDir, "blobs", algo, blobName),
+	} {
+		if _, err := os.Stat(srcPath); !os.IsNotExist(err) {
+			break
+		}
+		srcPath = candidate
 	}
 
 	cleanTmp := filepath.Clean(tmpDir) + string(os.PathSeparator)

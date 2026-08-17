@@ -28,7 +28,9 @@ go test ./...                   # unit tests, in-process registry, no external d
 
 ## Output
 
-`<output-dir>/`: `manifest.json` (pulled manifest), `tmp/` (raw blobs or OCI layout), `image/` (unpacked artifact), and with `--with-referrers` also `referrers/<artifact-type>/<digest>/` plus `result.json`.
+`<output-dir>/`: `manifest.json` (pulled manifest), `tmp/` (raw blobs or OCI layout), `image/` (unpacked artifact), `result.json` (image ref + resolved digest + referrers, written on every run), and with `--with-referrers` also `referrers/<artifact-type>/<digest>/`.
+
+References may be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...` — oras parses all three, so never re-derive the reference by splitting the image string.
 
 ## Key Facts
 

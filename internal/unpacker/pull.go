@@ -44,6 +44,7 @@ func Pull(ctx context.Context, cfg *Config) (string, error) {
 	log.Printf("pulling %s with oras", cfg.Image)
 	orasDigest, orasErr := pullWithOras(ctx, cfg, tmpDir)
 	if orasErr == nil {
+		log.Printf("resolved %s to %s", cfg.Image, orasDigest)
 		return orasDigest, nil
 	}
 
@@ -54,6 +55,7 @@ func Pull(ctx context.Context, cfg *Config) (string, error) {
 	craneDigest, craneErr := pullWithCrane(ctx, cfg)
 	switch {
 	case craneErr == nil:
+		log.Printf("resolved %s to %s", cfg.Image, craneDigest)
 		return craneDigest, nil
 	case errors.Is(orasErr, errUseCraneFallback):
 		// oras declined on purpose; it has nothing to say about the failure
@@ -143,9 +145,13 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) (string, erro
 		return "", err
 	}
 
-	ref := "latest"
-	if idx := strings.LastIndex(cfg.Image, ":"); idx > strings.LastIndex(cfg.Image, "/") {
-		ref = cfg.Image[idx+1:]
+	// The reference was already parsed when the repository was built. Splitting
+	// the string here instead used to turn repo@sha256:abc into the *tag* abc,
+	// so digest-pinned pulls looked up a tag that does not exist. oras handles
+	// repo:tag, repo@digest and repo:tag@digest (digest wins, per the spec).
+	ref := repo.Reference.Reference
+	if ref == "" {
+		ref = "latest"
 	}
 
 	// fetch manifest

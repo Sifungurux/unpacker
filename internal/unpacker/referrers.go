@@ -63,12 +63,12 @@ func FetchReferrers(ctx context.Context, cfg *Config, subjectDigest string) (*Re
 	switch {
 	case errors.Is(err, errdef.ErrUnsupported):
 		log.Printf("registry does not support the referrers API — no referrers fetched for %s", subjectDigest)
-		return result, writeResult(cfg, result)
+		return result, WriteResult(cfg, result)
 	case err != nil:
 		return nil, fmt.Errorf("query referrers for %s: %w", subjectDigest, err)
 	case len(descs) == 0:
 		log.Printf("no referrers found for %s (the registry may not implement the referrers API)", subjectDigest)
-		return result, writeResult(cfg, result)
+		return result, WriteResult(cfg, result)
 	}
 
 	baseDir := filepath.Join(cfg.OutputDir, "referrers")
@@ -81,7 +81,7 @@ func FetchReferrers(ctx context.Context, cfg *Config, subjectDigest string) (*Re
 		result.Referrers = append(result.Referrers, ref)
 	}
 
-	return result, writeResult(cfg, result)
+	return result, WriteResult(cfg, result)
 }
 
 // downloadReferrer writes one referrer's manifest and its layer blobs under
@@ -145,7 +145,10 @@ func downloadReferrer(ctx context.Context, repo content.Fetcher, desc ocispec.De
 	return ref, nil
 }
 
-func writeResult(cfg *Config, result *Result) error {
+// WriteResult writes result.json to the output dir. It is written on every
+// run, not only with --with-referrers, so the resolved digest is always
+// recorded for whatever consumes the output.
+func WriteResult(cfg *Config, result *Result) error {
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode result.json: %w", err)

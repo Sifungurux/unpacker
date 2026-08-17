@@ -69,13 +69,20 @@ func rootCmd() *cobra.Command {
 				return fmt.Errorf("unpack: %w", err)
 			}
 
+			// result.json records what was resolved either way; FetchReferrers
+			// writes it itself once it knows what it downloaded.
 			if withReferrers {
 				if _, err := unpacker.FetchReferrers(ctx, cfg, resolved); err != nil {
 					return fmt.Errorf("referrers: %w", err)
 				}
+				return nil
 			}
 
-			return nil
+			return unpacker.WriteResult(cfg, &unpacker.Result{
+				Image:     image,
+				Digest:    resolved,
+				Referrers: []unpacker.Referrer{},
+			})
 		},
 	}
 
