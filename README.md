@@ -10,7 +10,9 @@ Supports both OCI artifacts (Helm charts, Flux sources, custom artifacts) and st
 unpacker [OPTIONS] IMAGE
 
 Arguments:
-  IMAGE   Full image reference (registry/repo:tag)
+  IMAGE   Full image reference: registry/repo:tag, registry/repo@sha256:...,
+          or registry/repo:tag@sha256:... (the digest wins). Bare
+          registry/repo defaults to :latest.
 
 Options:
   -o, --output-dir   string    Output directory (default: .)
@@ -25,6 +27,16 @@ Options:
   -v, --version                Print version
   -h, --help                   Show help
 ```
+
+### Resolved digest and `result.json`
+
+Every run writes `<output-dir>/result.json` and logs the digest the reference resolved to, so whatever consumes the output records exactly what was analysed rather than a tag that may move:
+
+```json
+{ "image": "ghcr.io/myorg/app:v1", "digest": "sha256:b7df…", "referrers": [] }
+```
+
+Prefer digest-pinned references (`repo@sha256:...`) in a pipeline. For the crane fallback path the recorded digest is the one **the registry served**, not the digest of the media-type-normalised manifest written to the OCI layout.
 
 ### Attached artifacts (`--with-referrers`)
 
