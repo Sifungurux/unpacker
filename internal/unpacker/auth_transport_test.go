@@ -2,8 +2,13 @@ package unpacker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 )
@@ -74,5 +79,71 @@ func TestNewOrasRepository_ScopesCredentialsToTheParsedRegistry(t *testing.T) {
 func TestNewOrasRepository_RejectsReferenceWithoutRegistry(t *testing.T) {
 	if _, err := newOrasRepository(credsCfg("alpine:3.21", false, false)); err == nil {
 		t.Error("expected a bare reference to be rejected")
+	}
+}
+
+// TestPullWithCrane_DoesNotTouchDockerConfigEnv: authenticating from a docker
+// config file used to work by setting DOCKER_CONFIG process-wide and restoring
+// it afterwards — global state in a library, unsafe under concurrent use.
+func TestPullWithCrane_DoesNotTouchDockerConfigEnv(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", "/sentinel/value")
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		Image:     "registry.example.invalid/app:v1",
+		OutputDir: t.TempDir(),
+		Creds:     &Credentials{ConfigPath: configPath},
+	}
+	// The pull itself cannot succeed against a non-existent registry; what
+	// matters is that the environment is untouched either way.
+	_, _ = pullWithCrane(context.Background(), cfg)
+
+	if got := os.Getenv("DOCKER_CONFIG"); got != "/sentinel/value" {
+		t.Errorf("DOCKER_CONFIG = %q after the pull, want it untouched", got)
+	}
+}
+
+// The keychain must read the file it was given, including resolving the
+// base64 "auth" field the way docker's own config loader does.
+func TestConfigFileKeychain_ReadsTheGivenFile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	// dXNlcjpwYXNz == "user:pass"
+	if err := os.WriteFile(configPath, []byte(`{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := name.NewRepository("registry.example.com/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := configFileKeychain{path: configPath}.Resolve(repo)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	got, err := auth.Authorization()
+	if err != nil {
+		t.Fatalf("Authorization: %v", err)
+	}
+	if got.Username != "user" || got.Password != "pass" {
+		t.Errorf("got %s/%s, want user/pass", got.Username, got.Password)
+	}
+
+	// a registry the file says nothing about gets nothing
+	other, err := name.NewRepository("other.example.net/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAuth, err := configFileKeychain{path: configPath}.Resolve(other)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if otherAuth != authn.Anonymous {
+		t.Errorf("credentials offered for an unlisted registry: %+v", otherAuth)
 	}
 }

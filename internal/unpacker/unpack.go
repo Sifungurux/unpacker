@@ -142,7 +142,7 @@ func unpackInto(cfg *Config, imageDir string) error {
 		return runUmoci(tmpDir, imageDir)
 	}
 
-	return CopyFiles(tmpDir, imageDir)
+	return CopyFiles(tmpDir, imageDir, lim)
 }
 
 // allowedMediaType reports whether mediaType is covered by --mediatype.
@@ -380,8 +380,13 @@ func runUmoci(tmpDir, imageDir string) error {
 	return nil
 }
 
-// CopyFiles copies all regular files from srcDir to destDir. Exported for testing.
-func CopyFiles(srcDir, destDir string) error {
+// CopyFiles copies all regular files from srcDir to destDir, bounded by lim
+// the same way extraction is: the copy path handles blobs that are not
+// archives, but "not an archive" is not a reason to write unbounded content.
+// A zero-value lim resolves to the defaults. Exported for testing.
+func CopyFiles(srcDir, destDir string, lim Limits) error {
+	lim = lim.withDefaults()
+
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("create dest dir: %w", err)
 	}
@@ -389,31 +394,56 @@ func CopyFiles(srcDir, destDir string) error {
 	if err != nil {
 		return fmt.Errorf("read src dir: %w", err)
 	}
+
+	var copied int
+	var total int64
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
+		copied++
+		if copied > lim.MaxEntries {
+			return fmt.Errorf("more than %d files to copy (--max-entries)", lim.MaxEntries)
+		}
+
 		src, err := os.Open(filepath.Join(srcDir, entry.Name()))
 		if err != nil {
 			return err
 		}
-		dst, err := os.Create(filepath.Join(destDir, entry.Name()))
+		dstPath := filepath.Join(destDir, entry.Name())
+		dst, err := os.Create(dstPath)
 		if err != nil {
 			src.Close()
 			return err
 		}
-		if _, err := io.Copy(dst, src); err != nil {
-			src.Close()
-			dst.Close()
-			return err
+
+		// Same shape as extraction: read one byte past whichever limit binds
+		// first, so an over-large file is caught without being written whole.
+		allowed := lim.MaxFileBytes
+		if remaining := lim.MaxTotalBytes - total; remaining < allowed {
+			allowed = remaining
 		}
-		if err := dst.Sync(); err != nil {
-			src.Close()
-			dst.Close()
-			return err
-		}
+		n, copyErr := io.Copy(dst, io.LimitReader(src, allowed+1))
 		src.Close()
-		dst.Close()
+		if copyErr == nil {
+			copyErr = dst.Sync()
+		}
+		if closeErr := dst.Close(); copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr != nil {
+			return copyErr
+		}
+		switch {
+		case n > lim.MaxFileBytes:
+			return fmt.Errorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
+				entry.Name(), lim.MaxFileBytes)
+		case total+n > lim.MaxTotalBytes:
+			return fmt.Errorf("copied files expand past the %d byte total limit (--max-total-bytes)",
+				lim.MaxTotalBytes)
+		}
+		total += n
+
 		log.Printf("copied %s", entry.Name())
 	}
 	return nil

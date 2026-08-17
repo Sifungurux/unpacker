@@ -91,7 +91,7 @@ func TestCopyFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(src, "b.txt"), []byte("bbb"), 0644)
 
 	dest := t.TempDir()
-	if err := CopyFiles(src, dest); err != nil {
+	if err := CopyFiles(src, dest, Limits{}); err != nil {
 		t.Fatalf("CopyFiles: %v", err)
 	}
 
@@ -418,5 +418,35 @@ func TestUnpack_ReplacesPreviousOutput(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stale, "current.txt")); err != nil {
 		t.Errorf("current run's output missing: %v", err)
+	}
+}
+
+func TestCopyFiles_RespectsLimits(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "big.bin"), bytes.Repeat([]byte("A"), 5000), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := CopyFiles(src, t.TempDir(), Limits{MaxFileBytes: 1000, MaxTotalBytes: 1 << 20, MaxEntries: 10})
+	if err == nil {
+		t.Fatal("expected the per-file limit to be enforced")
+	}
+	if !strings.Contains(err.Error(), "--max-file-bytes") {
+		t.Errorf("error = %q, want it to name --max-file-bytes", err)
+	}
+
+	// and the total across several files
+	src2 := t.TempDir()
+	for _, name := range []string{"a.bin", "b.bin", "c.bin"} {
+		if err := os.WriteFile(filepath.Join(src2, name), bytes.Repeat([]byte("B"), 400), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = CopyFiles(src2, t.TempDir(), Limits{MaxFileBytes: 1000, MaxTotalBytes: 1000, MaxEntries: 10})
+	if err == nil {
+		t.Fatal("expected the total limit to be enforced")
+	}
+	if !strings.Contains(err.Error(), "--max-total-bytes") {
+		t.Errorf("error = %q, want it to name --max-total-bytes", err)
 	}
 }
