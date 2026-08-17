@@ -231,6 +231,8 @@ docker build -t unpacker:dev .   # or: podman build -t unpacker:dev .
 ./scripts/test-integration.sh
 ```
 
+The image cross-compiles the binary and selects the matching `umoci` release for `TARGETARCH`, so `--platform linux/amd64` and `--platform linux/arm64` both produce a working image. Adding an architecture means adding its pinned umoci hash to the Dockerfile — the build fails loudly rather than installing the wrong binary.
+
 The script runs two suites. Each is **skipped, not failed**, when its prerequisites are missing, so it is useful on a machine with no container engine at all.
 
 **Container suite** — needs docker or podman (whichever daemon actually answers; override with `ENGINE=podman`) and the `unpacker:dev` image. Exercises the published container end to end:
