@@ -26,6 +26,7 @@ func rootCmd() *cobra.Command {
 	var configPath string
 	var public bool
 	var insecure bool
+	var allowInsecureCredentials bool
 	var withReferrers bool
 	var maxTotalBytes int64
 	var maxFileBytes int64
@@ -45,12 +46,13 @@ func rootCmd() *cobra.Command {
 			}
 
 			cfg := &unpacker.Config{
-				Image:         image,
-				OutputDir:     outputDir,
-				AllowedTypes:  mediatypes,
-				Insecure:      insecure,
-				WithReferrers: withReferrers,
-				Creds:         creds,
+				Image:                    image,
+				OutputDir:                outputDir,
+				AllowedTypes:             mediatypes,
+				Insecure:                 insecure,
+				AllowInsecureCredentials: allowInsecureCredentials,
+				WithReferrers:            withReferrers,
+				Creds:                    creds,
 				Limits: unpacker.Limits{
 					MaxTotalBytes: maxTotalBytes,
 					MaxFileBytes:  maxFileBytes,
@@ -91,6 +93,8 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to dockerconfig.json for auth")
 	cmd.Flags().BoolVarP(&public, "public", "p", false, "Pull from a public registry (no auth required)")
 	cmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS verification (self-signed certs)")
+	cmd.Flags().BoolVar(&allowInsecureCredentials, "insecure-allow-credentials", false,
+		"Permit sending credentials over plain HTTP (they travel unencrypted)")
 	cmd.Flags().BoolVar(&withReferrers, "with-referrers", false,
 		"Download artifacts attached to the image (SBOMs, attestations, signatures) and write result.json")
 	cmd.Flags().Int64Var(&maxTotalBytes, "max-total-bytes", unpacker.DefaultMaxTotalBytes,

@@ -80,11 +80,22 @@ func newOrasRepository(cfg *Config) (*orasremote.Repository, error) {
 	}
 
 	if cfg.Creds != nil && cfg.Creds.Username != "" {
-		registry := strings.SplitN(cfg.Image, "/", 2)[0]
+		// Plain HTTP puts basic auth on the wire in the clear. Refusing by
+		// default means a typo'd --insecure against a real registry cannot
+		// leak a password; --insecure-allow-credentials is the way to say
+		// "yes, this really is my own test registry".
+		if repo.PlainHTTP && !cfg.AllowInsecureCredentials {
+			return nil, fmt.Errorf("refusing to send credentials over plain HTTP to %s: "+
+				"re-run with --insecure-allow-credentials if that is intended", repo.Reference.Registry)
+		}
+		// The credential is scoped to the registry oras parsed out of the
+		// reference, not to a hand-split prefix of the image string: a bare
+		// reference has no host in it at all, and docker.io resolves to a
+		// different auth host than it is written as.
 		repo.Client = &orasauth.Client{
 			Client: retry.DefaultClient,
 			Cache:  orasauth.DefaultCache,
-			Credential: orasauth.StaticCredential(registry, orasauth.Credential{
+			Credential: orasauth.StaticCredential(repo.Reference.Registry, orasauth.Credential{
 				Username: cfg.Creds.Username,
 				Password: cfg.Creds.Password,
 			}),

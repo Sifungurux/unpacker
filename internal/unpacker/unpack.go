@@ -15,12 +15,15 @@ import (
 
 // Config holds all runtime configuration passed from the CLI.
 type Config struct {
-	Image         string
-	OutputDir     string
-	AllowedTypes  []string
-	Insecure      bool
-	WithReferrers bool
-	Creds         *Credentials
+	Image        string
+	OutputDir    string
+	AllowedTypes []string
+	Insecure     bool
+	// AllowInsecureCredentials permits basic auth over plain HTTP, which is
+	// otherwise refused because the password would travel in the clear.
+	AllowInsecureCredentials bool
+	WithReferrers            bool
+	Creds                    *Credentials
 	Limits
 }
 
@@ -111,13 +114,45 @@ func Unpack(cfg *Config) error {
 	return CopyFiles(tmpDir, imageDir)
 }
 
+// allowedMediaType reports whether mediaType is covered by --mediatype.
+//
+// A value containing "/" is matched in full, so --mediatype
+// application/vnd.cncf.helm.chart.content.v1.tar+gzip means exactly that.
+// A bare word like "helm" matches a whole component of the media type —
+// "helm" covers application/vnd.cncf.helm.chart.content.v1.tar+gzip but not
+// application/vnd.example.nothelm.v1+json, which a plain substring test let
+// through.
 func allowedMediaType(mediaType string, allowedTypes []string) bool {
 	for _, allowed := range allowedTypes {
-		if strings.Contains(mediaType, allowed) {
-			return true
+		if allowed == "" {
+			continue
+		}
+		if strings.Contains(allowed, "/") {
+			if strings.EqualFold(mediaType, allowed) {
+				return true
+			}
+			continue
+		}
+		for _, part := range mediaTypeComponents(mediaType) {
+			if strings.EqualFold(part, allowed) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// mediaTypeComponents splits a media type into the words that make it up:
+// application/vnd.cncf.flux.content.v1.tar+gzip becomes application, vnd,
+// cncf, flux, content, v1, tar, gzip.
+func mediaTypeComponents(mediaType string) []string {
+	return strings.FieldsFunc(mediaType, func(r rune) bool {
+		switch r {
+		case '/', '.', '+', '-', ';', ' ', ',', '_':
+			return true
+		}
+		return false
+	})
 }
 
 // extractLayers extracts every allowed layer into imageDir in manifest order,
@@ -349,4 +384,10 @@ func CopyFiles(srcDir, destDir string) error {
 		log.Printf("copied %s", entry.Name())
 	}
 	return nil
+}
+
+// AllowedMediaTypeForTest exposes the --mediatype matching rule to the
+// external test package.
+func AllowedMediaTypeForTest(mediaType string, allowedTypes []string) bool {
+	return allowedMediaType(mediaType, allowedTypes)
 }
