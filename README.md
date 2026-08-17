@@ -21,7 +21,7 @@ Options:
   -p, --public                 Pull from a public registry (no auth required)
   -k, --insecure               Skip TLS verification / allow plain HTTP registries
       --with-referrers         Download artifacts attached to the image and write result.json
-      --max-total-bytes  int    Max total bytes written per archive (default: 1 GiB)
+      --max-total-bytes  int    Max total bytes written per artifact (default: 1 GiB)
       --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
       --max-entries      int    Max entries in an archive (default: 100000)
   -v, --version                Print version
@@ -76,7 +76,7 @@ For the crane fallback path the subject is the digest **as the registry served i
 
 ### Extraction limits
 
-A `.tar.gz` says nothing trustworthy about how far it expands, so when an artifact is extracted as a tarball the extraction is bounded by what is actually written to disk rather than by the sizes the archive declares. (These limits apply to the tar path; the umoci and plain-file-copy paths are not covered by them.) Exceeding any limit fails the run with an error naming the flag involved, and setuid/setgid/sticky bits are stripped from every extracted file so an archive cannot plant a privileged binary. Raise a limit when an artifact is legitimately larger:
+A `.tar.gz` says nothing trustworthy about how far it expands, so when an artifact is extracted as a tarball the extraction is bounded by what is actually written to disk rather than by the sizes the archive declares. `--max-total-bytes` covers the whole artifact — a multi-layer artifact shares one budget across its layers rather than getting the limit per layer. (These limits apply to the tar path; the umoci and plain-file-copy paths are not covered by them.) Exceeding any limit fails the run with an error naming the flag involved, and setuid/setgid/sticky bits are stripped from every extracted file so an archive cannot plant a privileged binary. Raise a limit when an artifact is legitimately larger:
 
 ```bash
 unpacker --public --max-total-bytes $((4 * 1024 * 1024 * 1024)) --output-dir ./output ghcr.io/myorg/big-artifact:v1
@@ -115,6 +115,10 @@ Pull with a custom allowed mediatype:
 ```bash
 unpacker --public -m kustomize -m helm --output-dir ./output ghcr.io/myorg/myartifact:latest
 ```
+
+### Multi-layer artifacts
+
+Every layer whose media type matches `--mediatype` is extracted into `image/` in manifest order, so a later layer overwrites an earlier one exactly as an image would. Layers whose media type does not match are left in `tmp/` — they are not tarballs this path knows how to read.
 
 ## Output Structure
 

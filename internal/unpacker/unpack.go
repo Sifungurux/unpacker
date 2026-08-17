@@ -61,8 +61,9 @@ type manifest struct {
 }
 
 type layer struct {
-	MediaType string `json:"mediaType"`
-	Digest    string `json:"digest"`
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Annotations map[string]string `json:"annotations"`
 }
 
 // Unpack reads manifest.json from outputDir and extracts the artifact to outputDir/image/.
@@ -74,8 +75,7 @@ func Unpack(cfg *Config) error {
 	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 	imageDir := filepath.Join(cfg.OutputDir, "image")
 
-	var mediaType, digest string
-	var useAllowedType bool
+	var allowed []layer
 
 	manifestPath := filepath.Join(cfg.OutputDir, "manifest.json")
 	if data, err := os.ReadFile(manifestPath); err == nil {
@@ -83,14 +83,12 @@ func Unpack(cfg *Config) error {
 		if err := json.Unmarshal(data, &m); err != nil {
 			return fmt.Errorf("parse manifest: %w", err)
 		}
-		if len(m.Layers) > 0 {
-			mediaType = m.Layers[0].MediaType
-			digest = m.Layers[0].Digest
-			for _, allowed := range cfg.AllowedTypes {
-				if strings.Contains(mediaType, allowed) {
-					useAllowedType = true
-					break
-				}
+		// Every matching layer is extracted, not just the first. An artifact
+		// can carry several blobs, and dropping the rest loses content with no
+		// error — the worst failure mode for something feeding an audit.
+		for _, l := range m.Layers {
+			if allowedMediaType(l.MediaType, cfg.AllowedTypes) {
+				allowed = append(allowed, l)
 			}
 		}
 	} else {
@@ -103,20 +101,81 @@ func Unpack(cfg *Config) error {
 
 	// hasTar: oras file store saved blob by annotated filename (e.g. chart-1.0.0.tgz)
 	// hasBlobs: OCI layout with blobs/sha256/ structure (crane output or oras with digest naming)
-	if hasTar {
-		if useAllowedType {
-			return extractFirstTar(tmpDir, imageDir, cfg.Limits)
-		}
-		return runUmoci(tmpDir, imageDir)
-	}
-	if hasBlobs {
-		if useAllowedType {
-			return extractOrasArtifact(tmpDir, imageDir, digest, cfg.Limits)
+	if hasTar || hasBlobs {
+		if len(allowed) > 0 {
+			return extractLayers(tmpDir, imageDir, allowed, cfg.Limits)
 		}
 		return runUmoci(tmpDir, imageDir)
 	}
 
 	return CopyFiles(tmpDir, imageDir)
+}
+
+func allowedMediaType(mediaType string, allowedTypes []string) bool {
+	for _, allowed := range allowedTypes {
+		if strings.Contains(mediaType, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractLayers extracts every allowed layer into imageDir in manifest order,
+// so a later layer overwrites an earlier one exactly as an image would.
+func extractLayers(tmpDir, imageDir string, layers []layer, lim Limits) error {
+	if err := os.MkdirAll(imageDir, 0755); err != nil {
+		return fmt.Errorf("create image dir: %w", err)
+	}
+	// The byte budget is shared across layers: --max-total-bytes bounds what
+	// the artifact expands to, not what each of its layers does.
+	budget := lim.withDefaults()
+	for _, l := range layers {
+		src, err := blobPath(tmpDir, l)
+		if err != nil {
+			return err
+		}
+		written, err := extractTar(src, imageDir, budget)
+		if err != nil {
+			return fmt.Errorf("extract layer %s: %w", l.Digest, err)
+		}
+		budget.MaxTotalBytes -= written
+	}
+	if len(layers) > 1 {
+		log.Printf("extracted %d layers", len(layers))
+	}
+	return nil
+}
+
+// blobPath finds where Pull put a layer's blob. oras names it by the title
+// annotation when there is one and by hex digest otherwise; the crane fallback
+// writes an OCI layout instead.
+func blobPath(tmpDir string, l layer) (string, error) {
+	parts := strings.SplitN(l.Digest, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid digest format: %s", l.Digest)
+	}
+	algo, hex := parts[0], parts[1]
+
+	var candidates []string
+	if title := l.Annotations["org.opencontainers.image.title"]; title != "" {
+		candidates = append(candidates, filepath.Join(tmpDir, filepath.Base(filepath.Clean("/"+title))))
+	}
+	candidates = append(candidates,
+		filepath.Join(tmpDir, l.Digest),
+		filepath.Join(tmpDir, hex),
+		filepath.Join(tmpDir, "blobs", algo, hex),
+	)
+
+	cleanTmp := filepath.Clean(tmpDir) + string(os.PathSeparator)
+	for _, c := range candidates {
+		if !strings.HasPrefix(filepath.Clean(c)+string(os.PathSeparator), cleanTmp) {
+			return "", fmt.Errorf("layer %s resolves outside tmp dir", l.Digest)
+		}
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no blob on disk for layer %s", l.Digest)
 }
 
 func firstFileIsTar(dir string) bool {
@@ -145,69 +204,24 @@ func dirExists(path string) bool {
 	return err == nil
 }
 
-// extractFirstTar extracts the first regular file in tmpDir as a tar.gz.
-// Used when oras stores the blob under its annotated filename rather than by digest.
-func extractFirstTar(tmpDir, imageDir string, lim Limits) error {
-	entries, err := os.ReadDir(tmpDir)
-	if err != nil {
-		return fmt.Errorf("read tmp dir: %w", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if err := os.MkdirAll(imageDir, 0755); err != nil {
-			return fmt.Errorf("create image dir: %w", err)
-		}
-		return ExtractTar(filepath.Join(tmpDir, e.Name()), imageDir, lim)
-	}
-	return fmt.Errorf("no file found in tmp dir")
-}
-
-func extractOrasArtifact(tmpDir, imageDir, digest string, lim Limits) error {
-	parts := strings.SplitN(digest, ":", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid digest format: %s", digest)
-	}
-	algo, blobName := parts[0], parts[1]
-
-	// The blob is named by its digest when oras pulled it, by its hex under
-	// blobs/<algo>/ when the crane fallback wrote an OCI layout. The layout
-	// case is reached whenever oras fails on an artifact whose media type is
-	// allowed — without it, extraction fails with a confusing "no such file".
-	srcPath := filepath.Join(tmpDir, digest)
-	for _, candidate := range []string{
-		filepath.Join(tmpDir, blobName),
-		filepath.Join(tmpDir, "blobs", algo, blobName),
-	} {
-		if _, err := os.Stat(srcPath); !os.IsNotExist(err) {
-			break
-		}
-		srcPath = candidate
-	}
-
-	cleanTmp := filepath.Clean(tmpDir) + string(os.PathSeparator)
-	if !strings.HasPrefix(filepath.Clean(srcPath)+string(os.PathSeparator), cleanTmp) {
-		return fmt.Errorf("digest resolves outside tmp dir: %s", digest)
-	}
-
-	if err := os.MkdirAll(imageDir, 0755); err != nil {
-		return fmt.Errorf("create image dir: %w", err)
-	}
-	return ExtractTar(srcPath, imageDir, lim)
-}
-
 // ExtractTar extracts a .tar.gz file to destDir, bounded by lim. Exported for testing.
 func ExtractTar(tarPath, destDir string, lim Limits) error {
+	_, err := extractTar(tarPath, destDir, lim)
+	return err
+}
+
+// extractTar is ExtractTar plus the number of bytes written, so a caller
+// extracting several layers can share one budget between them.
+func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
-		return fmt.Errorf("open tar: %w", err)
+		return 0, fmt.Errorf("open tar: %w", err)
 	}
 	defer f.Close()
 
 	gz, err := gzip.NewReader(f)
 	if err != nil {
-		return fmt.Errorf("open gzip: %w", err)
+		return 0, fmt.Errorf("open gzip: %w", err)
 	}
 	defer gz.Close()
 
@@ -224,12 +238,12 @@ func ExtractTar(tarPath, destDir string, lim Limits) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read tar entry: %w", err)
+			return total, fmt.Errorf("read tar entry: %w", err)
 		}
 
 		entries++
 		if entries > lim.MaxEntries {
-			return fmt.Errorf("archive has more than %d entries (--max-entries)", lim.MaxEntries)
+			return total, fmt.Errorf("archive has more than %d entries (--max-entries)", lim.MaxEntries)
 		}
 
 		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
@@ -238,7 +252,7 @@ func ExtractTar(tarPath, destDir string, lim Limits) error {
 			continue
 		}
 		if !strings.HasPrefix(target, cleanDest) {
-			return fmt.Errorf("illegal path in tar: %s", hdr.Name)
+			return total, fmt.Errorf("illegal path in tar: %s", hdr.Name)
 		}
 
 		// Perm() keeps only the 0777 bits, dropping setuid/setgid/sticky:
@@ -248,15 +262,15 @@ func ExtractTar(tarPath, destDir string, lim Limits) error {
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, mode); err != nil {
-				return err
+				return total, err
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return err
+				return total, err
 			}
 			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
-				return err
+				return total, err
 			}
 			// Read one byte past whichever limit binds first, so an
 			// over-large entry is detected without writing it out in full.
@@ -269,20 +283,20 @@ func ExtractTar(tarPath, destDir string, lim Limits) error {
 			n, copyErr := io.Copy(out, io.LimitReader(tr, allowed+1))
 			out.Close()
 			if copyErr != nil {
-				return copyErr
+				return total, copyErr
 			}
 			switch {
 			case n > lim.MaxFileBytes:
-				return fmt.Errorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
+				return total, fmt.Errorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
 					hdr.Name, lim.MaxFileBytes)
 			case total+n > lim.MaxTotalBytes:
-				return fmt.Errorf("archive expands past the %d byte total limit (--max-total-bytes)",
+				return total, fmt.Errorf("archive expands past the %d byte total limit (--max-total-bytes)",
 					lim.MaxTotalBytes)
 			}
 			total += n
 		}
 	}
-	return nil
+	return total, nil
 }
 
 func runUmoci(tmpDir, imageDir string) error {

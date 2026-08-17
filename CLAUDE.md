@@ -36,6 +36,7 @@ References may be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...` — or
 
 - This is the Go successor to the Python CLI in `../artifact-unpack` (same problem space, different implementation) — confirm with the user which one is the deployed/maintained version before extending either
 - `-k/--insecure` skips TLS verification — never default this on, it's meant for local/dev registries only
-- Extraction limits apply to the tar path only; `runUmoci` and `CopyFiles` are not bounded by them
+- Extraction limits apply to the tar path only; `runUmoci` and `CopyFiles` are not bounded by them. `--max-total-bytes` is shared across a multi-layer artifact's layers, not applied per layer
+- `Unpack` extracts **every** layer whose media type matches, in manifest order (later layers overwrite earlier) — extracting only the first silently loses content
 - `Pull` returns the digest **as the registry served it** — for the crane path that is deliberately not the digest of the normalised manifest written to the OCI layout, because referrers attach to the served one
 - A registry without the referrers API is a no-op, not an error: oras falls back to the referrers tag schema and an absent tag yields an empty list with no error
