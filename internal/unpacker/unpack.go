@@ -2,6 +2,8 @@ package unpacker
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -11,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // Config holds all runtime configuration passed from the CLI.
@@ -130,7 +134,7 @@ func unpackInto(cfg *Config, imageDir string) error {
 	}
 
 	blobsDir := filepath.Join(tmpDir, "blobs", "sha256")
-	hasTar := firstFileIsTar(tmpDir)
+	hasTar := firstFileIsArchive(tmpDir)
 	hasBlobs := dirExists(blobsDir)
 
 	// hasTar: oras file store saved blob by annotated filename (e.g. chart-1.0.0.tgz)
@@ -245,7 +249,10 @@ func blobPath(tmpDir string, l layer) (string, error) {
 	return "", fmt.Errorf("no blob on disk for layer %s", l.Digest)
 }
 
-func firstFileIsTar(dir string) bool {
+// firstFileIsArchive reports whether the first regular file in dir looks like
+// an archive this package can extract. It is a routing hint only — what gets
+// extracted comes from the manifest.
+func firstFileIsArchive(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
@@ -258,10 +265,9 @@ func firstFileIsTar(dir string) bool {
 		if err != nil {
 			return false
 		}
-		buf := make([]byte, 2)
-		n, _ := f.Read(buf)
+		_, kind := sniffCompression(bufio.NewReader(f))
 		f.Close()
-		return n == 2 && buf[0] == 0x1f && buf[1] == 0x8b
+		return kind != compressionUnknown
 	}
 	return false
 }
@@ -288,13 +294,13 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 	}
 	defer f.Close()
 
-	gz, err := gzip.NewReader(f)
+	stream, closeStream, err := tarStream(f)
 	if err != nil {
-		return 0, fmt.Errorf("open gzip: %w", err)
+		return 0, err
 	}
-	defer gz.Close()
+	defer closeStream()
 
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(stream)
 	cleanDest := filepath.Clean(destDir) + string(os.PathSeparator)
 
 	var entries int
@@ -447,4 +453,80 @@ func CopyFiles(srcDir, destDir string, lim Limits) error {
 		log.Printf("copied %s", entry.Name())
 	}
 	return nil
+}
+
+// Compression handling.
+//
+// The compression is detected from the bytes rather than from the layer's
+// media type: a mislabelled layer still extracts, and the error for something
+// genuinely unsupported names what was actually found. OCI allows +gzip,
+// +zstd and uncompressed tar layers.
+type compressionKind int
+
+const (
+	compressionUnknown compressionKind = iota
+	compressionGzip
+	compressionZstd
+	compressionNone // uncompressed tar
+)
+
+func (c compressionKind) String() string {
+	switch c {
+	case compressionGzip:
+		return "gzip"
+	case compressionZstd:
+		return "zstd"
+	case compressionNone:
+		return "uncompressed tar"
+	default:
+		return "unrecognised"
+	}
+}
+
+var (
+	magicGzip = []byte{0x1f, 0x8b}
+	magicZstd = []byte{0x28, 0xb5, 0x2f, 0xfd}
+)
+
+// sniffCompression peeks at br without consuming it.
+func sniffCompression(br *bufio.Reader) ([]byte, compressionKind) {
+	// 262 covers the ustar magic at offset 257 in a tar header
+	head, _ := br.Peek(262)
+	switch {
+	case bytes.HasPrefix(head, magicGzip):
+		return head, compressionGzip
+	case bytes.HasPrefix(head, magicZstd):
+		return head, compressionZstd
+	case len(head) >= 262 && bytes.HasPrefix(head[257:262], []byte("ustar")):
+		return head, compressionNone
+	default:
+		return head, compressionUnknown
+	}
+}
+
+// tarStream returns the uncompressed tar stream from r, plus a function to
+// release whatever decompressor it set up.
+func tarStream(r io.Reader) (io.Reader, func(), error) {
+	br := bufio.NewReader(r)
+	head, kind := sniffCompression(br)
+
+	switch kind {
+	case compressionGzip:
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open gzip: %w", err)
+		}
+		return gz, func() { gz.Close() }, nil
+	case compressionZstd:
+		zr, err := zstd.NewReader(br)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open zstd: %w", err)
+		}
+		return zr, zr.Close, nil
+	case compressionNone:
+		return br, func() {}, nil
+	default:
+		n := min(len(head), 4)
+		return nil, nil, fmt.Errorf("unsupported layer compression: first bytes %x are not gzip, zstd or an uncompressed tar", head[:n])
+	}
 }

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // tarEntry describes one regular file to place in a test archive.
@@ -448,5 +450,106 @@ func TestCopyFiles_RespectsLimits(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--max-total-bytes") {
 		t.Errorf("error = %q, want it to name --max-total-bytes", err)
+	}
+}
+
+// makeTarEntries writes a tar built with the given compression and returns its
+// path. compress is "gzip", "zstd" or "none".
+func makeTarCompressed(t *testing.T, compress string, entries ...tarEntry) string {
+	t.Helper()
+	var raw bytes.Buffer
+	tw := tar.NewWriter(&raw)
+	for _, e := range entries {
+		mode := e.mode
+		if mode == 0 {
+			mode = 0644
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: e.name, Mode: mode, Size: int64(len(e.body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(e.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	switch compress {
+	case "gzip":
+		gz := gzip.NewWriter(&out)
+		if _, err := gz.Write(raw.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case "zstd":
+		zw, err := zstd.NewWriter(&out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := zw.Write(raw.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case "none":
+		out = raw
+	default:
+		t.Fatalf("unknown compression %q", compress)
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(out.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return f.Name()
+}
+
+// OCI allows +gzip, +zstd and uncompressed tar layers; only gzip used to work,
+// and anything else failed with a confusing "open gzip" error.
+func TestExtractTar_SupportedCompressions(t *testing.T) {
+	for _, compress := range []string{"gzip", "zstd", "none"} {
+		t.Run(compress, func(t *testing.T) {
+			tarPath := makeTarCompressed(t, compress, tarEntry{name: "hello.txt", body: []byte("hello " + compress)})
+			destDir := t.TempDir()
+
+			if err := ExtractTar(tarPath, destDir, Limits{}); err != nil {
+				t.Fatalf("ExtractTar(%s): %v", compress, err)
+			}
+			got, err := os.ReadFile(filepath.Join(destDir, "hello.txt"))
+			if err != nil {
+				t.Fatalf("read extracted file: %v", err)
+			}
+			if want := "hello " + compress; string(got) != want {
+				t.Errorf("content = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestExtractTar_UnsupportedCompressionIsNamed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "blob.bin")
+	// bzip2 magic — a real compression this package does not handle
+	if err := os.WriteFile(path, append([]byte("BZh9"), bytes.Repeat([]byte{0}, 512)...), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ExtractTar(path, t.TempDir(), Limits{})
+	if err == nil {
+		t.Fatal("expected an error for an unsupported compression")
+	}
+	if !strings.Contains(err.Error(), "unsupported layer compression") {
+		t.Errorf("error = %q, want it to name the unsupported compression", err)
+	}
+	if strings.Contains(err.Error(), "open gzip") {
+		t.Errorf("error = %q, want it to not blame gzip", err)
 	}
 }
