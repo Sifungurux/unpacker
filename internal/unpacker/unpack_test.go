@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -208,5 +209,124 @@ func TestExtractTar_StripsSpecialModeBits(t *testing.T) {
 	}
 	if perm := fi.Mode().Perm(); perm&0o111 == 0 {
 		t.Errorf("extracted mode %v lost its permission bits entirely", fi.Mode())
+	}
+}
+
+// stageArtifact writes a manifest.json and the matching blobs into a fresh
+// output dir, the way Pull would leave them for Unpack.
+func stageArtifact(t *testing.T, layers []map[string]any, blobs map[string]string) string {
+	t.Helper()
+	outputDir := t.TempDir()
+	tmpDir := filepath.Join(outputDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, tarPath := range blobs {
+		data, err := os.ReadFile(tarPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := json.Marshal(map[string]any{"layers": layers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "manifest.json"), manifest, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return outputDir
+}
+
+func fluxLayer(title string) map[string]any {
+	return map[string]any{
+		"mediaType":   "application/vnd.cncf.flux.content.v1.tar+gzip",
+		"digest":      "sha256:" + strings.Repeat("a", 64),
+		"annotations": map[string]string{"org.opencontainers.image.title": title},
+	}
+}
+
+// TestUnpack_ExtractsEveryMatchingLayer is a regression test for silent content
+// loss: only the first layer used to be extracted, so a multi-blob artifact
+// lost everything after it — with no error and a zero exit code.
+func TestUnpack_ExtractsEveryMatchingLayer(t *testing.T) {
+	one := makeTarGzEntries(t, tarEntry{name: "first.txt", body: []byte("from layer one")})
+	two := makeTarGzEntries(t, tarEntry{name: "second.txt", body: []byte("from layer two")})
+
+	l1, l2 := fluxLayer("layer1.tgz"), fluxLayer("layer2.tgz")
+	l2["digest"] = "sha256:" + strings.Repeat("b", 64)
+
+	outputDir := stageArtifact(t, []map[string]any{l1, l2},
+		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
+
+	cfg := &unpacker.Config{OutputDir: outputDir, AllowedTypes: []string{"flux", "helm"}}
+	if err := unpacker.Unpack(cfg); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+
+	for name, want := range map[string]string{
+		"first.txt":  "from layer one",
+		"second.txt": "from layer two",
+	} {
+		got, err := os.ReadFile(filepath.Join(outputDir, "image", name))
+		if err != nil {
+			t.Errorf("%s missing from image/: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestUnpack_LaterLayerWins(t *testing.T) {
+	one := makeTarGzEntries(t, tarEntry{name: "shared.txt", body: []byte("old")})
+	two := makeTarGzEntries(t, tarEntry{name: "shared.txt", body: []byte("new")})
+
+	l1, l2 := fluxLayer("layer1.tgz"), fluxLayer("layer2.tgz")
+	l2["digest"] = "sha256:" + strings.Repeat("b", 64)
+
+	outputDir := stageArtifact(t, []map[string]any{l1, l2},
+		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
+
+	cfg := &unpacker.Config{OutputDir: outputDir, AllowedTypes: []string{"flux"}}
+	if err := unpacker.Unpack(cfg); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outputDir, "image", "shared.txt"))
+	if err != nil {
+		t.Fatalf("read shared.txt: %v", err)
+	}
+	if string(got) != "new" {
+		t.Errorf("shared.txt = %q, want the later layer's %q", got, "new")
+	}
+}
+
+// The total-bytes budget covers the artifact, not each layer: two layers that
+// each fit must still fail together when their sum does not.
+func TestUnpack_TotalLimitIsSharedAcrossLayers(t *testing.T) {
+	one := makeTarGzEntries(t, tarEntry{name: "a.bin", body: bytes.Repeat([]byte("A"), 400)})
+	two := makeTarGzEntries(t, tarEntry{name: "b.bin", body: bytes.Repeat([]byte("B"), 400)})
+
+	l1, l2 := fluxLayer("layer1.tgz"), fluxLayer("layer2.tgz")
+	l2["digest"] = "sha256:" + strings.Repeat("b", 64)
+
+	outputDir := stageArtifact(t, []map[string]any{l1, l2},
+		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
+
+	cfg := &unpacker.Config{
+		OutputDir:    outputDir,
+		AllowedTypes: []string{"flux"},
+		Limits:       unpacker.Limits{MaxTotalBytes: 600, MaxFileBytes: 500, MaxEntries: 10},
+	}
+	err := unpacker.Unpack(cfg)
+	if err == nil {
+		t.Fatal("expected the shared byte budget to be exceeded across two layers")
+	}
+	if !strings.Contains(err.Error(), "--max-total-bytes") {
+		t.Errorf("error = %q, want it to name --max-total-bytes", err)
 	}
 }

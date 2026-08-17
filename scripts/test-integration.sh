@@ -341,7 +341,32 @@ EOF
   pass "Helm chart — $HELM_MEDIATYPE extracted, Chart.yaml verified"
   echo ""
 
-  # Test 7: media type outside --mediatype must NOT be tar-extracted.
+  # Test 7: every matching layer must be extracted, not just the first.
+  # A multi-blob artifact used to lose everything after layer one, silently
+  # and with a zero exit code.
+  echo "==> Test: Multi-layer artifact extracts every layer"
+  mkdir -p "$WORKDIR/l1" "$WORKDIR/l2"
+  echo "from layer one" > "$WORKDIR/l1/first.txt"
+  echo "from layer two" > "$WORKDIR/l2/second.txt"
+  (cd "$WORKDIR/l1" && tar czf ../layer1.tgz .)
+  (cd "$WORKDIR/l2" && tar czf ../layer2.tgz .)
+
+  (cd "$WORKDIR" && oras push "$registry/test/multi:v1" --plain-http \
+    "layer1.tgz:$FLUX_MEDIATYPE" \
+    "layer2.tgz:$FLUX_MEDIATYPE" > /dev/null)
+
+  local multi_out="$WORKDIR/out-multi"
+  "$unpacker" --public --insecure --output-dir "$multi_out" "$registry/test/multi:v1"
+
+  for f in first.txt second.txt; do
+    [ -f "$multi_out/image/$f" ] || fail "Multi-layer artifact — $f missing from image/"
+  done
+  grep -q "from layer two" "$multi_out/image/second.txt" \
+    || fail "Multi-layer artifact — second layer content wrong"
+  pass "Multi-layer artifact — both layers extracted"
+  echo ""
+
+  # Test 8: media type outside --mediatype must NOT be tar-extracted.
   # The same flux artifact, pulled with only 'helm' allowed, has to fall
   # through to umoci — which rejects it, since it is not an OCI image layout.
   # Without this the allowlist could silently accept everything.
@@ -387,7 +412,7 @@ else
   skip "Container suite — no usable container engine (start Docker or podman)"
 fi
 
-missing=$(missing_tools go flux helm umoci curl)
+missing=$(missing_tools go flux helm umoci oras curl)
 if [ -n "$missing" ]; then
   skip "Media-type suite — missing:$missing"
 else
