@@ -127,6 +127,8 @@ Pull with a custom allowed mediatype:
 unpacker --public -m kustomize -m helm --output-dir ./output ghcr.io/myorg/myartifact:latest
 ```
 
+`image/` appears only when the unpack has fully succeeded — extraction happens in a staging directory that is renamed into place at the end, so a failed run leaves no half-extracted tree to be mistaken for a complete artifact. `tmp/` is left behind either way, for debugging.
+
 ### Multi-layer artifacts
 
 Every layer whose media type matches `--mediatype` is extracted into `image/` in manifest order, so a later layer overwrites an earlier one exactly as an image would. Layers whose media type does not match are left in `tmp/` — they are not tarballs this path knows how to read.

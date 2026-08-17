@@ -358,3 +358,67 @@ func TestAllowedMediaTypeMatching(t *testing.T) {
 		})
 	}
 }
+
+// TestUnpack_FailureLeavesNoImageDir: a partially extracted tree used to stay
+// on disk after a failed run, so a consumer reading the directory rather than
+// the exit code saw a truncated artifact as a complete one.
+func TestUnpack_FailureLeavesNoImageDir(t *testing.T) {
+	one := makeTarGzEntries(t, tarEntry{name: "a.bin", body: bytes.Repeat([]byte("A"), 400)})
+	two := makeTarGzEntries(t, tarEntry{name: "b.bin", body: bytes.Repeat([]byte("B"), 400)})
+
+	l1, l2 := fluxLayer("layer1.tgz"), fluxLayer("layer2.tgz")
+	l2["digest"] = "sha256:" + strings.Repeat("b", 64)
+
+	outputDir := stageArtifact(t, []map[string]any{l1, l2},
+		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
+
+	cfg := &unpacker.Config{
+		OutputDir:    outputDir,
+		AllowedTypes: []string{"flux"},
+		Limits:       unpacker.Limits{MaxTotalBytes: 600, MaxFileBytes: 500, MaxEntries: 10},
+	}
+	if err := unpacker.Unpack(cfg); err == nil {
+		t.Fatal("expected the extraction to fail")
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "image")); !os.IsNotExist(err) {
+		t.Errorf("image/ exists after a failed unpack: %v", err)
+	}
+	// staging must not be left behind either
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "staging") {
+			t.Errorf("staging directory %q left behind", e.Name())
+		}
+	}
+}
+
+// A successful run must still replace whatever a previous run left.
+func TestUnpack_ReplacesPreviousOutput(t *testing.T) {
+	tarPath := makeTarGzEntries(t, tarEntry{name: "current.txt", body: []byte("current")})
+	outputDir := stageArtifact(t, []map[string]any{fluxLayer("layer1.tgz")},
+		map[string]string{"layer1.tgz": tarPath})
+
+	stale := filepath.Join(outputDir, "image")
+	if err := os.MkdirAll(stale, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "stale.txt"), []byte("old run"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &unpacker.Config{OutputDir: outputDir, AllowedTypes: []string{"flux"}}
+	if err := unpacker.Unpack(cfg); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(stale, "stale.txt")); !os.IsNotExist(err) {
+		t.Error("output from the previous run survived into image/")
+	}
+	if _, err := os.Stat(filepath.Join(stale, "current.txt")); err != nil {
+		t.Errorf("current run's output missing: %v", err)
+	}
+}

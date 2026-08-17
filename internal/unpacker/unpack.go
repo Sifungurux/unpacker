@@ -74,9 +74,37 @@ type layer struct {
 //   - Path 1: tar extract (ORAS artifact, mediaType matches allowed list)
 //   - Path 2: umoci exec (OCI image)
 //   - Path 3: file copy (plain files, no tarball or blobs dir found)
+//
+// The output directory appears only once the unpack has fully succeeded: a
+// half-extracted image/ left behind by a failed run reads as a complete
+// artifact to anything that looks at the directory rather than the exit code.
 func Unpack(cfg *Config) error {
-	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 	imageDir := filepath.Join(cfg.OutputDir, "image")
+	stagingDir := filepath.Join(cfg.OutputDir, ".image.staging")
+
+	// A previous crash could have left staging behind; umoci also refuses to
+	// unpack into a directory that already exists.
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return fmt.Errorf("clear staging dir: %w", err)
+	}
+
+	if err := unpackInto(cfg, stagingDir); err != nil {
+		os.RemoveAll(stagingDir) //nolint:errcheck // already returning an error
+		return err
+	}
+
+	// tmp/ is deliberately left in place either way, for debugging.
+	if err := os.RemoveAll(imageDir); err != nil {
+		return fmt.Errorf("replace previous image dir: %w", err)
+	}
+	if err := os.Rename(stagingDir, imageDir); err != nil {
+		return fmt.Errorf("publish image dir: %w", err)
+	}
+	return nil
+}
+
+func unpackInto(cfg *Config, imageDir string) error {
+	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 
 	var allowed []layer
 
