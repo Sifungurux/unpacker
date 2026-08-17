@@ -1,3 +1,11 @@
+> **Historical record — not current documentation.**
+>
+> Written for the April 2026 Go rewrite and kept as a record of that decision.
+> The tool has since gained digest verification, extraction limits, multi-layer
+> extraction, referrers support, compression detection and an overhauled auth
+> path, so anything here that reads as a description of current behaviour is
+> probably wrong. See the README and CLAUDE.md for what unpacker does today.
+
 # Unpacker — Go Rewrite Design
 
 **Date:** 2026-04-09
