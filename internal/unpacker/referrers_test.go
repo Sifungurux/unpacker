@@ -80,7 +80,7 @@ func pushReferrer(t *testing.T, cfg *Config, artifactType, title string, payload
 }
 
 func TestFetchReferrers_DownloadsAttachedArtifacts(t *testing.T) {
-	addr := startOCIRegistry(t, "", registry.WithReferrersSupport(true))
+	addr := startRegistry(t, "", registry.WithReferrersSupport(true))
 	cfg, _ := orasTestConfig(t, pushOCIArtifact(t, addr, "test/withrefs"))
 	subject := pushReferrer(t, cfg, "application/spdx+json", "sbom.spdx.json", []byte(testSBOM))
 
@@ -136,7 +136,7 @@ func TestFetchReferrers_DownloadsAttachedArtifacts(t *testing.T) {
 // distinguish "found the artifact attached to this digest" from "found
 // whatever the registry felt like returning".
 func TestFetchReferrers_WrongSubjectFindsNothing(t *testing.T) {
-	addr := startOCIRegistry(t, "", registry.WithReferrersSupport(true))
+	addr := startRegistry(t, "", registry.WithReferrersSupport(true))
 	cfg, _ := orasTestConfig(t, pushOCIArtifact(t, addr, "test/wrongsubject"))
 	pushReferrer(t, cfg, "application/spdx+json", "sbom.spdx.json", []byte(testSBOM))
 
@@ -155,7 +155,7 @@ func TestFetchReferrers_WrongSubjectFindsNothing(t *testing.T) {
 // 1.1: the in-process registry only serves the referrers API when asked to, so
 // leaving it off reproduces one exactly. This must be a no-op, not a failure.
 func TestFetchReferrers_NoReferrersSupport(t *testing.T) {
-	addr := startOCIRegistry(t, "") // referrers API deliberately not enabled
+	addr := startRegistry(t, "") // referrers API deliberately not enabled
 	cfg, _ := orasTestConfig(t, pushOCIArtifact(t, addr, "test/norefs"))
 
 	repo, err := newOrasRepository(cfg)
