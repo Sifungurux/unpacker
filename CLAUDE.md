@@ -13,7 +13,7 @@ unpacker -o <output-dir> -m <mediatype> -c <dockerconfig.json> IMAGE
 unpacker --public --output-dir ./output ghcr.io/stefanprodan/charts/podinfo:6.7.1
 ```
 
-Flags: `-o/--output-dir`, `-m/--mediatype` (repeatable, default flux+helm), `-c/--config`, `-p/--public`, `-k/--insecure`, `--max-total-bytes` (1GiB), `--max-file-bytes` (512MiB), `--max-entries` (100k), `--with-referrers`.
+Flags: `-o/--output-dir`, `-m/--mediatype` (repeatable, default flux+helm), `-c/--config`, `-p/--public`, `-k/--insecure`, `--max-total-bytes` (1GiB), `--max-file-bytes` (512MiB), `--max-entries` (100k), `--with-referrers`, `--insecure-allow-credentials`.
 
 ## Testing
 
@@ -35,7 +35,9 @@ References may be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...` — or
 ## Key Facts
 
 - This is the Go successor to the Python CLI in `../artifact-unpack` (same problem space, different implementation) — confirm with the user which one is the deployed/maintained version before extending either
-- `-k/--insecure` skips TLS verification — never default this on, it's meant for local/dev registries only
+- `-k/--insecure` skips TLS verification — never default this on, it's meant for local/dev registries only. It does **not** by itself permit credentials over plain HTTP; that needs `--insecure-allow-credentials`
+- Credentials: `UNPACKER_USERNAME`/`UNPACKER_PASSWORD` (the unprefixed `USERNAME`/`PASSWORD` still work but warn — Windows and many CI images set them)
+- `--mediatype` matches a full media type exactly, or a bare word against a whole component of it — not a raw substring
 - Extraction limits apply to the tar path only; `runUmoci` and `CopyFiles` are not bounded by them. `--max-total-bytes` is shared across a multi-layer artifact's layers, not applied per layer
 - `Unpack` extracts **every** layer whose media type matches, in manifest order (later layers overwrite earlier) — extracting only the first silently loses content
 - `Pull` returns the digest **as the registry served it** — for the crane path that is deliberately not the digest of the normalised manifest written to the OCI layout, because referrers attach to the served one

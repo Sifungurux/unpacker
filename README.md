@@ -20,6 +20,7 @@ Options:
   -c, --config       string    Path to dockerconfig.json for auth
   -p, --public                 Pull from a public registry (no auth required)
   -k, --insecure               Skip TLS verification / allow plain HTTP registries
+      --insecure-allow-credentials  Permit credentials over plain HTTP (unencrypted)
       --with-referrers         Download artifacts attached to the image and write result.json
       --max-total-bytes  int    Max total bytes written per artifact (default: 1 GiB)
       --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
@@ -27,6 +28,16 @@ Options:
   -v, --version                Print version
   -h, --help                   Show help
 ```
+
+### Authentication
+
+Credentials come from `--config <dockerconfig.json>` or the `UNPACKER_USERNAME` / `UNPACKER_PASSWORD` environment variables. The unprefixed `USERNAME` / `PASSWORD` still work but warn: Windows sets `USERNAME` for every login session and many CI images export both, so unpacker could otherwise pick up an unrelated value and send it to a registry.
+
+Credentials are **refused over plain HTTP** — `--insecure` alone will not send a password in the clear. Add `--insecure-allow-credentials` when the target really is your own test registry. They are scoped to the registry parsed out of the reference, so they are never offered to another host.
+
+### Media type matching
+
+`--mediatype` accepts either a full media type (`application/vnd.cncf.helm.chart.content.v1.tar+gzip`, matched exactly) or a bare word (`helm`), which matches a whole component of the media type. `helm` covers `application/vnd.cncf.helm.chart.content.v1.tar+gzip` but not `application/vnd.example.nothelm.v1+json`.
 
 ### Resolved digest and `result.json`
 

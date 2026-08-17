@@ -48,3 +48,20 @@ func TestResolve_NoCreds_Error(t *testing.T) {
 		t.Error("expected error for private registry without credentials")
 	}
 }
+
+func TestResolve_PrefixedEnvVars(t *testing.T) {
+	t.Setenv("UNPACKER_USERNAME", "prefixed-user")
+	t.Setenv("UNPACKER_PASSWORD", "prefixed-pass")
+	t.Setenv("USERNAME", "ambient-user")
+	t.Setenv("PASSWORD", "ambient-pass")
+
+	creds, err := unpacker.Resolve("", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The unprefixed names are set by Windows and by many CI images, so the
+	// explicit ones have to win rather than merely be available.
+	if creds.Username != "prefixed-user" || creds.Password != "prefixed-pass" {
+		t.Errorf("got %s/%s, want the UNPACKER_-prefixed values", creds.Username, creds.Password)
+	}
+}
