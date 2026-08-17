@@ -330,3 +330,31 @@ func TestUnpack_TotalLimitIsSharedAcrossLayers(t *testing.T) {
 		t.Errorf("error = %q, want it to name --max-total-bytes", err)
 	}
 }
+
+func TestAllowedMediaTypeMatching(t *testing.T) {
+	const fluxType = "application/vnd.cncf.flux.content.v1.tar+gzip"
+	const helmType = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+
+	for _, tc := range []struct {
+		name      string
+		mediaType string
+		allowed   []string
+		want      bool
+	}{
+		{"short name matches a component", fluxType, []string{"flux", "helm"}, true},
+		{"short name matches the other component", helmType, []string{"flux", "helm"}, true},
+		{"non-matching short name", fluxType, []string{"helm"}, false},
+		{"full media type matches exactly", helmType, []string{helmType}, true},
+		{"full media type must match in full", helmType, []string{fluxType}, false},
+		// the substring test used to accept this
+		{"component boundaries are respected", "application/vnd.example.nothelm.v1+json", []string{"helm"}, false},
+		{"docker layer is not a flux artifact", "application/vnd.docker.image.rootfs.diff.tar.gzip", []string{"flux", "helm"}, false},
+		{"empty allowlist matches nothing", fluxType, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unpacker.AllowedMediaTypeForTest(tc.mediaType, tc.allowed); got != tc.want {
+				t.Errorf("allowedMediaType(%q, %v) = %v, want %v", tc.mediaType, tc.allowed, got, tc.want)
+			}
+		})
+	}
+}
