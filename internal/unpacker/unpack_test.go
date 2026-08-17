@@ -1,4 +1,4 @@
-package unpacker_test
+package unpacker
 
 import (
 	"archive/tar"
@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/Sifungurux/unpacker/internal/unpacker"
 )
 
 // tarEntry describes one regular file to place in a test archive.
@@ -74,7 +72,7 @@ func TestExtractTar(t *testing.T) {
 	destDir := t.TempDir()
 
 	// zero-value Limits: every field falls back to its default
-	if err := unpacker.ExtractTar(tarPath, destDir, unpacker.Limits{}); err != nil {
+	if err := ExtractTar(tarPath, destDir, Limits{}); err != nil {
 		t.Fatalf("ExtractTar: %v", err)
 	}
 
@@ -93,7 +91,7 @@ func TestCopyFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(src, "b.txt"), []byte("bbb"), 0644)
 
 	dest := t.TempDir()
-	if err := unpacker.CopyFiles(src, dest); err != nil {
+	if err := CopyFiles(src, dest); err != nil {
 		t.Fatalf("CopyFiles: %v", err)
 	}
 
@@ -107,7 +105,7 @@ func TestCopyFiles(t *testing.T) {
 func TestExtractTar_PathTraversal(t *testing.T) {
 	tarPath := makeTarGzEntries(t, tarEntry{name: "../escape.txt", body: []byte("bad")})
 
-	err := unpacker.ExtractTar(tarPath, t.TempDir(), unpacker.Limits{})
+	err := ExtractTar(tarPath, t.TempDir(), Limits{})
 	if err == nil {
 		t.Error("expected path traversal error, got nil")
 	}
@@ -122,7 +120,7 @@ func TestExtractTar_RejectsOversizedFile(t *testing.T) {
 	tarPath := makeTarGzEntries(t, tarEntry{name: "big.bin", body: bytes.Repeat([]byte("A"), 5000)})
 	destDir := t.TempDir()
 
-	err := unpacker.ExtractTar(tarPath, destDir, unpacker.Limits{
+	err := ExtractTar(tarPath, destDir, Limits{
 		MaxFileBytes:  limit,
 		MaxTotalBytes: 1 << 20,
 		MaxEntries:    10,
@@ -148,7 +146,7 @@ func TestExtractTar_RejectsOversizedTotal(t *testing.T) {
 		tarEntry{name: "c.bin", body: bytes.Repeat([]byte("C"), 400)},
 	)
 
-	err := unpacker.ExtractTar(tarPath, t.TempDir(), unpacker.Limits{
+	err := ExtractTar(tarPath, t.TempDir(), Limits{
 		MaxFileBytes:  1000,
 		MaxTotalBytes: 1000,
 		MaxEntries:    10,
@@ -168,7 +166,7 @@ func TestExtractTar_RejectsTooManyEntries(t *testing.T) {
 	}
 	tarPath := makeTarGzEntries(t, entries...)
 
-	err := unpacker.ExtractTar(tarPath, t.TempDir(), unpacker.Limits{
+	err := ExtractTar(tarPath, t.TempDir(), Limits{
 		MaxFileBytes:  1 << 20,
 		MaxTotalBytes: 1 << 20,
 		MaxEntries:    3,
@@ -196,7 +194,7 @@ func TestExtractTar_StripsSpecialModeBits(t *testing.T) {
 	tarPath := makeTarGzEntries(t, tarEntry{name: "rooted", mode: 0o4755})
 	destDir := t.TempDir()
 
-	if err := unpacker.ExtractTar(tarPath, destDir, unpacker.Limits{}); err != nil {
+	if err := ExtractTar(tarPath, destDir, Limits{}); err != nil {
 		t.Fatalf("ExtractTar: %v", err)
 	}
 
@@ -261,8 +259,8 @@ func TestUnpack_ExtractsEveryMatchingLayer(t *testing.T) {
 	outputDir := stageArtifact(t, []map[string]any{l1, l2},
 		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
 
-	cfg := &unpacker.Config{OutputDir: outputDir, AllowedTypes: []string{"flux", "helm"}}
-	if err := unpacker.Unpack(cfg); err != nil {
+	cfg := &Config{OutputDir: outputDir, AllowedTypes: []string{"flux", "helm"}}
+	if err := Unpack(cfg); err != nil {
 		t.Fatalf("Unpack: %v", err)
 	}
 
@@ -291,8 +289,8 @@ func TestUnpack_LaterLayerWins(t *testing.T) {
 	outputDir := stageArtifact(t, []map[string]any{l1, l2},
 		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
 
-	cfg := &unpacker.Config{OutputDir: outputDir, AllowedTypes: []string{"flux"}}
-	if err := unpacker.Unpack(cfg); err != nil {
+	cfg := &Config{OutputDir: outputDir, AllowedTypes: []string{"flux"}}
+	if err := Unpack(cfg); err != nil {
 		t.Fatalf("Unpack: %v", err)
 	}
 
@@ -317,12 +315,12 @@ func TestUnpack_TotalLimitIsSharedAcrossLayers(t *testing.T) {
 	outputDir := stageArtifact(t, []map[string]any{l1, l2},
 		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
 
-	cfg := &unpacker.Config{
+	cfg := &Config{
 		OutputDir:    outputDir,
 		AllowedTypes: []string{"flux"},
-		Limits:       unpacker.Limits{MaxTotalBytes: 600, MaxFileBytes: 500, MaxEntries: 10},
+		Limits:       Limits{MaxTotalBytes: 600, MaxFileBytes: 500, MaxEntries: 10},
 	}
-	err := unpacker.Unpack(cfg)
+	err := Unpack(cfg)
 	if err == nil {
 		t.Fatal("expected the shared byte budget to be exceeded across two layers")
 	}
@@ -352,7 +350,7 @@ func TestAllowedMediaTypeMatching(t *testing.T) {
 		{"empty allowlist matches nothing", fluxType, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := unpacker.AllowedMediaTypeForTest(tc.mediaType, tc.allowed); got != tc.want {
+			if got := allowedMediaType(tc.mediaType, tc.allowed); got != tc.want {
 				t.Errorf("allowedMediaType(%q, %v) = %v, want %v", tc.mediaType, tc.allowed, got, tc.want)
 			}
 		})
@@ -372,12 +370,12 @@ func TestUnpack_FailureLeavesNoImageDir(t *testing.T) {
 	outputDir := stageArtifact(t, []map[string]any{l1, l2},
 		map[string]string{"layer1.tgz": one, "layer2.tgz": two})
 
-	cfg := &unpacker.Config{
+	cfg := &Config{
 		OutputDir:    outputDir,
 		AllowedTypes: []string{"flux"},
-		Limits:       unpacker.Limits{MaxTotalBytes: 600, MaxFileBytes: 500, MaxEntries: 10},
+		Limits:       Limits{MaxTotalBytes: 600, MaxFileBytes: 500, MaxEntries: 10},
 	}
-	if err := unpacker.Unpack(cfg); err == nil {
+	if err := Unpack(cfg); err == nil {
 		t.Fatal("expected the extraction to fail")
 	}
 
@@ -410,8 +408,8 @@ func TestUnpack_ReplacesPreviousOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &unpacker.Config{OutputDir: outputDir, AllowedTypes: []string{"flux"}}
-	if err := unpacker.Unpack(cfg); err != nil {
+	cfg := &Config{OutputDir: outputDir, AllowedTypes: []string{"flux"}}
+	if err := Unpack(cfg); err != nil {
 		t.Fatalf("Unpack: %v", err)
 	}
 

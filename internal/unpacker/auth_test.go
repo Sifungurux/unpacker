@@ -1,13 +1,11 @@
-package unpacker_test
+package unpacker
 
 import (
 	"testing"
-
-	"github.com/Sifungurux/unpacker/internal/unpacker"
 )
 
 func TestResolve_Public(t *testing.T) {
-	creds, err := unpacker.Resolve("", true)
+	creds, err := Resolve("", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -17,7 +15,7 @@ func TestResolve_Public(t *testing.T) {
 }
 
 func TestResolve_ConfigPath(t *testing.T) {
-	creds, err := unpacker.Resolve("/path/to/config.json", false)
+	creds, err := Resolve("/path/to/config.json", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -30,7 +28,7 @@ func TestResolve_EnvVars(t *testing.T) {
 	t.Setenv("USERNAME", "user")
 	t.Setenv("PASSWORD", "pass")
 
-	creds, err := unpacker.Resolve("", false)
+	creds, err := Resolve("", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -43,7 +41,7 @@ func TestResolve_NoCreds_Error(t *testing.T) {
 	t.Setenv("USERNAME", "")
 	t.Setenv("PASSWORD", "")
 
-	_, err := unpacker.Resolve("", false)
+	_, err := Resolve("", false)
 	if err == nil {
 		t.Error("expected error for private registry without credentials")
 	}
@@ -55,7 +53,7 @@ func TestResolve_PrefixedEnvVars(t *testing.T) {
 	t.Setenv("USERNAME", "ambient-user")
 	t.Setenv("PASSWORD", "ambient-pass")
 
-	creds, err := unpacker.Resolve("", false)
+	creds, err := Resolve("", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -21,7 +21,7 @@ import (
 
 const testBlobContent = "fake content"
 
-// startOCIRegistry runs an in-process registry. Responses to GET requests whose
+// startRegistry runs an in-process registry. Responses to GET requests whose
 // path contains corruptPath (empty = none) get one byte flipped, simulating a
 // registry that serves content not matching the digest it was asked for. The
 // body length is unchanged, so only the digest check can catch it.
@@ -29,7 +29,7 @@ const testBlobContent = "fake content"
 // Blob responses advertise "Accept-Ranges: bytes" like GHCR and Docker Hub do;
 // oras hands back a different reader implementation for those, and that reader's
 // end-of-body behaviour is what the verification depends on.
-func startOCIRegistry(t *testing.T, corruptPath string, opts ...registry.Option) string {
+func startRegistry(t *testing.T, corruptPath string, opts ...registry.Option) string {
 	t.Helper()
 	inner := registry.New(opts...)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +91,7 @@ func orasTestConfig(t *testing.T, image string) (*Config, string) {
 }
 
 func TestPullWithOras_VerifiesGoodBlob(t *testing.T) {
-	addr := startOCIRegistry(t, "")
+	addr := startRegistry(t, "")
 	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/ociartifact"))
 
 	if _, err := pullWithOras(context.Background(), cfg, tmpDir); err != nil {
@@ -115,7 +115,7 @@ func TestPullWithOras_VerifiesGoodBlob(t *testing.T) {
 }
 
 func TestPullWithOras_CorruptedBlobRejected(t *testing.T) {
-	addr := startOCIRegistry(t, "/blobs/sha256:")
+	addr := startRegistry(t, "/blobs/sha256:")
 	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/corruptblob"))
 
 	_, err := pullWithOras(context.Background(), cfg, tmpDir)
@@ -154,7 +154,7 @@ func TestPullWithOras_CorruptedBlobRejected(t *testing.T) {
 }
 
 func TestPullWithOras_CorruptedManifestRejected(t *testing.T) {
-	addr := startOCIRegistry(t, "/manifests/")
+	addr := startRegistry(t, "/manifests/")
 	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/corruptmanifest"))
 
 	_, err := pullWithOras(context.Background(), cfg, tmpDir)
@@ -174,7 +174,7 @@ func TestPullWithOras_CorruptedManifestRejected(t *testing.T) {
 // a tag, so repo@sha256:abc looked up the tag "abc" and 404'd — the form a
 // supply-chain pipeline is most likely to use was the one that did not work.
 func TestPullWithOras_ReferenceForms(t *testing.T) {
-	addr := startOCIRegistry(t, "")
+	addr := startRegistry(t, "")
 	image := pushOCIArtifact(t, addr, "test/refforms")
 
 	// resolve the tag once to learn the digest the other forms should hit
