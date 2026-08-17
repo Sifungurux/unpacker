@@ -168,3 +168,41 @@ func TestPullWithOras_CorruptedManifestRejected(t *testing.T) {
 		t.Errorf("manifest.json written despite digest mismatch: %v", statErr)
 	}
 }
+
+// TestPullWithOras_ReferenceForms covers the three ways a reference can name a
+// manifest. Digest-pinned pulls used to resolve the text after the last ":" as
+// a tag, so repo@sha256:abc looked up the tag "abc" and 404'd — the form a
+// supply-chain pipeline is most likely to use was the one that did not work.
+func TestPullWithOras_ReferenceForms(t *testing.T) {
+	addr := startOCIRegistry(t, "")
+	image := pushOCIArtifact(t, addr, "test/refforms")
+
+	// resolve the tag once to learn the digest the other forms should hit
+	tagCfg, tagTmp := orasTestConfig(t, image)
+	want, err := pullWithOras(context.Background(), tagCfg, tagTmp)
+	if err != nil {
+		t.Fatalf("pull by tag: %v", err)
+	}
+
+	repoRef := addr + "/test/refforms"
+	for _, tc := range []struct{ name, image string }{
+		{"tag", repoRef + ":latest"},
+		{"digest", repoRef + "@" + want},
+		{"tag and digest", repoRef + ":latest@" + want},
+		{"no reference defaults to latest", repoRef},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, tmpDir := orasTestConfig(t, tc.image)
+			got, err := pullWithOras(context.Background(), cfg, tmpDir)
+			if err != nil {
+				t.Fatalf("pullWithOras(%q): %v", tc.image, err)
+			}
+			if got != want {
+				t.Errorf("pullWithOras(%q) resolved to %s, want %s", tc.image, got, want)
+			}
+			if _, err := os.Stat(filepath.Join(cfg.OutputDir, "manifest.json")); err != nil {
+				t.Errorf("manifest.json not written for %q: %v", tc.image, err)
+			}
+		})
+	}
+}
