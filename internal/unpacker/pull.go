@@ -146,6 +146,62 @@ func fetchBlobToFile(ctx context.Context, fetcher content.Fetcher, desc ocispec.
 // pullWithOras, as opposed to a real failure worth reporting alongside crane's.
 var errUseCraneFallback = errors.New("not an OCI artifact")
 
+// craneFallbackReason reports why a manifest cannot be handled on the oras
+// path, or "" when it can. The distinction is images versus artifacts, not
+// OCI versus Docker -- getting that backwards is what caused both of the
+// failures this function exists to prevent.
+//
+// It used to be a prefix test on "application/vnd.docker.", which let two
+// shapes through that oras cannot actually handle:
+//
+//   - an OCI image INDEX. Not a docker media type, so it passed. The code
+//     below then looked for a "layers" field, which an index does not have
+//     (it has "manifests"), found none, downloaded no blobs and returned
+//     SUCCESS. Every multi-platform image published as an OCI index --
+//     measured at 47 of 95 references in one real fleet -- unpacked to an
+//     empty directory while reporting that it had worked. Anything reading
+//     that directory to decide whether an image is safe was reading
+//     nothing.
+//
+//   - an OCI image MANIFEST. oras downloaded the layer blobs as bare files,
+//     which is right for an artifact and wrong for an image: umoci needs an
+//     oci-layout, and rejected the directory with "invalid image detected"
+//     one step later.
+//
+// An index also needs crane for a second reason: choosing a platform. oras
+// fetches the reference it was given, and for an index that is the list
+// itself, not any image in it.
+//
+// A genuine OCI artifact -- a helm chart, a flux manifest -- keeps the oras
+// path, which is the whole reason this tool uses oras at all. The test is
+// the config media type, which is what the image-spec uses to say "this
+// manifest describes a runnable image" as opposed to arbitrary content.
+func craneFallbackReason(mediaType string, manifestBytes []byte) string {
+	if strings.HasPrefix(mediaType, "application/vnd.docker.") {
+		return fmt.Sprintf("docker manifest type %q", mediaType)
+	}
+	if mediaType == ocispec.MediaTypeImageIndex {
+		return fmt.Sprintf("OCI image index %q needs a platform chosen", mediaType)
+	}
+	if mediaType == ocispec.MediaTypeImageManifest {
+		var m struct {
+			Config struct {
+				MediaType string `json:"mediaType"`
+			} `json:"config"`
+		}
+		// An unparseable manifest is not this function's error to report --
+		// the caller parses it again and fails there with a better message.
+		// Treating it as an artifact keeps that behaviour unchanged.
+		if err := json.Unmarshal(manifestBytes, &m); err != nil {
+			return ""
+		}
+		if m.Config.MediaType == ocispec.MediaTypeImageConfig {
+			return fmt.Sprintf("OCI image manifest with config %q", m.Config.MediaType)
+		}
+	}
+	return ""
+}
+
 // pullWithOras fetches the manifest and each layer blob directly from the registry.
 // It does not set PlainHTTP or TLS InsecureSkipVerify — plain-HTTP and
 // self-signed-cert registries will intentionally fail here and be handled by
@@ -179,10 +235,11 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) (string, erro
 		return "", fmt.Errorf("read manifest %s: %w", desc.Digest, err)
 	}
 
-	// Docker manifests must go through crane (writes OCI layout for umoci).
-	// Return an error here so Pull() falls back to pullWithCrane.
-	if strings.HasPrefix(desc.MediaType, "application/vnd.docker.") {
-		return "", fmt.Errorf("docker manifest type %q: %w", desc.MediaType, errUseCraneFallback)
+	// Anything that is a container IMAGE rather than an OCI artifact has to
+	// go through crane, which writes the OCI layout umoci needs. Return an
+	// error here so Pull() falls back to pullWithCrane.
+	if reason := craneFallbackReason(desc.MediaType, manifestBytes); reason != "" {
+		return "", fmt.Errorf("%s: %w", reason, errUseCraneFallback)
 	}
 
 	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "manifest.json"), manifestBytes, 0644); err != nil {
