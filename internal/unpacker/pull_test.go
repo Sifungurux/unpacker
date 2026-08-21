@@ -9,8 +9,11 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
@@ -205,5 +208,137 @@ func TestPull_ManifestWritten(t *testing.T) {
 	var m map[string]interface{}
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Errorf("manifest.json is not valid JSON: %v", err)
+	}
+}
+
+// pushOCIIndex pushes a multi-platform OCI image INDEX and returns the ref.
+//
+// This is the shape that matters most in practice: nearly every modern
+// public image is published as an index, and `docker pull` resolves the
+// platform for you so nobody notices what the manifest actually is.
+func pushOCIIndex(t *testing.T, registryAddr, repo string) string {
+	t.Helper()
+	ref := registryAddr + "/" + repo + ":latest"
+
+	build := func(content, arch string) v1.Image {
+		layer := static.NewLayer([]byte(content), types.OCILayer)
+		img, err := mutate.AppendLayers(empty.Image, layer)
+		if err != nil {
+			t.Fatalf("build test image: %v", err)
+		}
+		img = mutate.MediaType(img, types.OCIManifestSchema1)
+		img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
+		return img
+	}
+
+	idx := mutate.IndexMediaType(empty.Index, types.OCIImageIndex)
+	for _, p := range []struct{ arch, content string }{
+		{"amd64", "amd64 content"},
+		{"arm64", "arm64 content"},
+	} {
+		img := build(p.content, p.arch)
+		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
+			Add:        img,
+			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: p.arch}},
+		})
+	}
+
+	tag, err := name.NewTag(ref, name.Insecure)
+	if err != nil {
+		t.Fatalf("parse ref: %v", err)
+	}
+	if err := remote.WriteIndex(tag, idx); err != nil {
+		t.Fatalf("push index: %v", err)
+	}
+	return ref
+}
+
+// pushOCIImage pushes a single-platform OCI image MANIFEST (not an index,
+// and not a docker manifest) and returns the ref.
+func pushOCIImage(t *testing.T, registryAddr, repo string) string {
+	t.Helper()
+	ref := registryAddr + "/" + repo + ":latest"
+	layer := static.NewLayer([]byte("oci content"), types.OCILayer)
+	img, err := mutate.AppendLayers(empty.Image, layer)
+	if err != nil {
+		t.Fatalf("build test image: %v", err)
+	}
+	img = mutate.MediaType(img, types.OCIManifestSchema1)
+	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
+	if err := crane.Push(img, ref, crane.Insecure); err != nil {
+		t.Fatalf("push test image: %v", err)
+	}
+	return ref
+}
+
+// TestPull_OCIIndex_ExtractsFiles is the regression test for the worst
+// failure this tool has had: an OCI image index pulled successfully, exit
+// code 0, and NOTHING on disk.
+//
+// oras only declined manifests whose media type began with
+// "application/vnd.docker.". An OCI index passed that check, so oras kept
+// the pull -- then parsed the index for a "layers" field it does not have
+// (an index has "manifests"), found none, downloaded no blobs, and
+// returned success.
+//
+// Measured against a real fleet before this was fixed: 47 of 95 public
+// image references were OCI indexes, and every one of them unpacked to an
+// empty directory. A malware scanner reading that directory reports the
+// image clean.
+func TestPull_OCIIndex_ExtractsFiles(t *testing.T) {
+	addr := startRegistry(t, "")
+	image := pushOCIIndex(t, addr, "test/ociindex")
+
+	outputDir := t.TempDir()
+	cfg := &Config{
+		Image:     image,
+		OutputDir: outputDir,
+		Insecure:  true,
+		Creds:     &Credentials{Public: true},
+	}
+
+	if _, err := Pull(context.Background(), cfg); err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+
+	// The blobs are what prove it. An index that resolved to nothing
+	// leaves tmp/ empty while still returning a digest.
+	blobs := filepath.Join(outputDir, "tmp", "blobs", "sha256")
+	entries, err := os.ReadDir(blobs)
+	if err != nil {
+		t.Fatalf("no OCI layout written for an index pull (%v) -- the pull produced nothing", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("OCI layout contains no blobs -- the index resolved to nothing and the pull still reported success")
+	}
+}
+
+// TestPull_OCIImageManifest_ProducesAnUnpackableLayout covers the other
+// half of the same routing bug. An OCI image manifest is not a docker
+// manifest, so oras kept it and downloaded the layer blobs as bare files
+// -- a directory umoci then rejects with "invalid image detected",
+// because it is not an OCI layout.
+func TestPull_OCIImageManifest_ProducesAnUnpackableLayout(t *testing.T) {
+	addr := startRegistry(t, "")
+	image := pushOCIImage(t, addr, "test/ociimage")
+
+	outputDir := t.TempDir()
+	cfg := &Config{
+		Image:     image,
+		OutputDir: outputDir,
+		Insecure:  true,
+		Creds:     &Credentials{Public: true},
+	}
+
+	if _, err := Pull(context.Background(), cfg); err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+
+	// oci-layout is the file umoci checks first. Its absence is exactly
+	// the "invalid image detected" failure, caught here rather than one
+	// step later in an error message that names neither the media type
+	// nor the reference.
+	if _, err := os.Stat(filepath.Join(outputDir, "tmp", "oci-layout")); err != nil {
+		t.Fatalf("no oci-layout written for an OCI image manifest (%v) -- umoci rejects this directory", err)
 	}
 }

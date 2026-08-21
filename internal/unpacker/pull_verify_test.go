@@ -60,6 +60,15 @@ func startRegistry(t *testing.T, corruptPath string, opts ...registry.Option) st
 
 // pushOCIArtifact pushes an image with OCI media types throughout, so
 // pullWithOras handles it instead of bailing out to the crane fallback.
+// pushOCIArtifact pushes a real OCI ARTIFACT: an OCI manifest whose config
+// media type is NOT the image config type.
+//
+// That distinction is the whole point of these tests. They exercise oras's
+// blob verification, and only artifacts take the oras path -- an image
+// manifest is handed to crane, which does its own verification through a
+// completely different code path. This helper used to push an image and
+// was named for what it was meant to represent; the tests below passed
+// while covering the artifact path with a non-artifact.
 func pushOCIArtifact(t *testing.T, registryAddr, repo string) string {
 	t.Helper()
 	ref := registryAddr + "/" + repo + ":latest"
@@ -68,9 +77,9 @@ func pushOCIArtifact(t *testing.T, registryAddr, repo string) string {
 		t.Fatalf("build test image: %v", err)
 	}
 	img = mutate.MediaType(img, types.OCIManifestSchema1)
-	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
+	img = mutate.ConfigMediaType(img, "application/vnd.cncf.helm.config.v1+json")
 	if err := crane.Push(img, ref, crane.Insecure); err != nil {
-		t.Fatalf("push test image: %v", err)
+		t.Fatalf("push test artifact: %v", err)
 	}
 	return ref
 }
