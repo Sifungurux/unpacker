@@ -1,6 +1,6 @@
 # Cross-compiled from the build platform rather than emulated on the target:
 # CGO is off, so GOARCH is all that is needed.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS builder
 ARG TARGETARCH
 WORKDIR /build
 COPY go.mod go.sum ./

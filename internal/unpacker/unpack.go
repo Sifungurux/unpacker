@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -27,8 +28,19 @@ type Config struct {
 	// otherwise refused because the password would travel in the clear.
 	AllowInsecureCredentials bool
 	WithReferrers            bool
+	MaxReferrers             int
 	Creds                    *Credentials
 	Limits
+}
+
+// maxReferrers resolves the configured cap, treating unset as the default for
+// the same reason Limits.withDefaults does: this is a safety control, so zero
+// must never mean unlimited.
+func (c *Config) maxReferrers() int {
+	if c.MaxReferrers <= 0 {
+		return DefaultMaxReferrers
+	}
+	return c.MaxReferrers
 }
 
 // Default extraction limits. A tar.gz says nothing trustworthy about how much
@@ -38,6 +50,9 @@ const (
 	DefaultMaxTotalBytes int64 = 1 << 30   // 1 GiB
 	DefaultMaxFileBytes  int64 = 512 << 20 // 512 MiB
 	DefaultMaxEntries    int   = 100_000
+	// A referrers listing is registry-controlled and each entry is a separate
+	// download; 100 is far past any real image's attachments.
+	DefaultMaxReferrers int = 100
 )
 
 // Limits bounds what one archive may expand to on disk.
@@ -305,6 +320,7 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 
 	var entries int
 	var total int64
+	skipped := map[byte]int{}
 
 	for {
 		hdr, err := tr.Next()
@@ -355,7 +371,17 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 				allowed = remaining
 			}
 			n, copyErr := io.Copy(out, io.LimitReader(tr, allowed+1))
-			out.Close()
+			// Errors can surface at flush time (ENOSPC, quota, a network
+			// filesystem) long after every in-flight byte check passed.
+			// Unpack publishes image/ atomically on success, so an
+			// unchecked Close here publishes a truncated file as complete.
+			// Same shape as CopyFiles below.
+			if copyErr == nil {
+				copyErr = out.Sync()
+			}
+			if closeErr := out.Close(); copyErr == nil {
+				copyErr = closeErr
+			}
 			if copyErr != nil {
 				return total, copyErr
 			}
@@ -368,9 +394,59 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 					lim.MaxTotalBytes)
 			}
 			total += n
+
+		case tar.TypeXGlobalHeader:
+			// Archive metadata, not an entry that was dropped: counting it
+			// would put a warning on every git-archive tarball.
+
+		default:
+			// Only directories and regular files are ever created. Symlinks,
+			// hardlinks, devices and FIFOs are dropped on purpose: link
+			// entries are where the 2026 extraction CVEs live — oras-go's
+			// hardlink escape (CVE-2026-50163), moby/go-archive's symlink
+			// TOCTOU (CVE-2026-17106), Helm's dot-segment collapse
+			// (CVE-2026-35206) — because validating a link target and then
+			// acting on it are two different moments. Not creating them at
+			// all has no such gap. Do not "fix" this by adding link support.
+			//
+			// The cost is that an artifact containing links extracts
+			// incomplete, so say so rather than dropping them silently.
+			skipped[hdr.Typeflag]++
 		}
 	}
+	if len(skipped) > 0 {
+		log.Printf("skipped %d unsupported tar entries (%s): only regular files and directories are extracted",
+			totalSkipped(skipped), describeSkipped(skipped))
+	}
 	return total, nil
+}
+
+// tar type flags carry no names in archive/tar, and a bare byte in a log line
+// tells nobody anything.
+var tarTypeNames = map[byte]string{
+	tar.TypeSymlink: "symlink", tar.TypeLink: "hardlink", tar.TypeChar: "char device",
+	tar.TypeBlock: "block device", tar.TypeFifo: "fifo", tar.TypeXGlobalHeader: "global header",
+}
+
+func totalSkipped(skipped map[byte]int) int {
+	n := 0
+	for _, c := range skipped {
+		n += c
+	}
+	return n
+}
+
+func describeSkipped(skipped map[byte]int) string {
+	parts := make([]string, 0, len(skipped))
+	for flag, count := range skipped {
+		name, ok := tarTypeNames[flag]
+		if !ok {
+			name = fmt.Sprintf("type %q", flag)
+		}
+		parts = append(parts, fmt.Sprintf("%s x%d", name, count))
+	}
+	sort.Strings(parts) // map order is random; a log line that reorders run to run is noise
+	return strings.Join(parts, ", ")
 }
 
 func runUmoci(tmpDir, imageDir string) error {

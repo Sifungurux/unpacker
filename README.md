@@ -19,12 +19,13 @@ Options:
   -m, --mediatype    string    Allowed mediatype, repeatable (default: flux, helm)
   -c, --config       string    Path to dockerconfig.json for auth
   -p, --public                 Pull from a public registry (no auth required)
-  -k, --insecure               Skip TLS verification / allow plain HTTP registries
+  -k, --insecure               Allow plain HTTP (oras path) / skip TLS verification (crane path)
       --insecure-allow-credentials  Permit credentials over plain HTTP (unencrypted)
       --with-referrers         Download artifacts attached to the image and write result.json
       --max-total-bytes  int    Max total bytes written per artifact (default: 1 GiB)
       --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
       --max-entries      int    Max entries in an archive (default: 100000)
+      --max-referrers    int    Max referrers to download for one image (default: 100)
   -v, --version                Print version
   -h, --help                   Show help
 ```
@@ -33,7 +34,7 @@ Options:
 
 Credentials come from `--config <dockerconfig.json>` or the `UNPACKER_USERNAME` / `UNPACKER_PASSWORD` environment variables. The unprefixed `USERNAME` / `PASSWORD` still work but warn: Windows sets `USERNAME` for every login session and many CI images export both, so unpacker could otherwise pick up an unrelated value and send it to a registry.
 
-Credentials are **refused over plain HTTP** — `--insecure` alone will not send a password in the clear. Add `--insecure-allow-credentials` when the target really is your own test registry. They are scoped to the registry parsed out of the reference, so they are never offered to another host.
+`--insecure` means two different things depending on which path the manifest routes to: plain HTTP (no TLS at all) on the oras path, and unverified TLS on the crane path. Credentials are **refused over both** — `--insecure` alone will not send a password to a registry that has not proved who it is. Add `--insecure-allow-credentials` when the target really is your own test registry. They are scoped to the registry parsed out of the reference, so they are never offered to another host.
 
 ### Media type matching
 
@@ -86,6 +87,8 @@ Registries that predate OCI 1.1 are **a no-op, not a failure**: unpacker logs th
 For the crane fallback path the subject is the digest **as the registry served it**, not the digest of the media-type-normalised manifest written to the OCI layout — referrers hang off the former.
 
 ### Extraction limits
+
+The same limits bound the **download** phase as well as extraction: a blob whose declared size is over `--max-file-bytes`, or which would take the pull past `--max-total-bytes`, is rejected before a byte of it is fetched. Without that, a registry declaring a 500 GB layer fills the disk before any limit is consulted. `--max-referrers` caps how many attached artifacts one image may pull.
 
 A `.tar.gz` says nothing trustworthy about how far it expands, so when an artifact is extracted as a tarball the extraction is bounded by what is actually written to disk rather than by the sizes the archive declares. `--max-total-bytes` covers the whole artifact — a multi-layer artifact shares one budget across its layers rather than getting the limit per layer. The same three limits bound the plain-file copy path; only `umoci` (which does its own unpacking) is outside them. (These limits apply to the tar and file-copy paths; `umoci` does its own unpacking and is not covered by them.) Exceeding any limit fails the run with an error naming the flag involved, and setuid/setgid/sticky bits are stripped from every extracted file so an archive cannot plant a privileged binary. Raise a limit when an artifact is legitimately larger:
 

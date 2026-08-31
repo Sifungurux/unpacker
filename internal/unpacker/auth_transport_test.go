@@ -147,3 +147,29 @@ func TestConfigFileKeychain_ReadsTheGivenFile(t *testing.T) {
 		t.Errorf("credentials offered for an unlisted registry: %+v", otherAuth)
 	}
 }
+
+// The crane path carries more traffic than the oras one — every image index
+// and every Docker manifest routes to it — so the same guard has to hold
+// there. --insecure builds a transport with InsecureSkipVerify, which is a
+// certificate an interceptor can satisfy with anything.
+func TestPullWithCrane_RefusesCredentialsOverInsecureTLS(t *testing.T) {
+	_, err := pullWithCrane(context.Background(), credsCfg("registry.example.com/app:v1", true, false))
+	if err == nil {
+		t.Fatal("expected credentials over unverified TLS to be refused")
+	}
+	if !strings.Contains(err.Error(), "--insecure-allow-credentials") {
+		t.Errorf("error = %q, want it to name the opt-out flag", err)
+	}
+}
+
+// The opt-in has to work, or the guard is just a broken --insecure. This gets
+// past the refusal and fails later on the network, which is the point: the
+// error must not be the credential one.
+func TestPullWithCrane_AllowsCredentialsOverInsecureTLSWhenAskedTo(t *testing.T) {
+	cfg := credsCfg("registry.example.com/app:v1", true, true)
+	cfg.OutputDir = t.TempDir()
+	_, err := pullWithCrane(context.Background(), cfg)
+	if err != nil && strings.Contains(err.Error(), "--insecure-allow-credentials") {
+		t.Errorf("--insecure-allow-credentials should permit it, got %q", err)
+	}
+}

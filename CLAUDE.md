@@ -35,11 +35,14 @@ References may be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...` — or
 ## Key Facts
 
 - This is the Go successor to the Python CLI in `../artifact-unpack` (same problem space, different implementation) — confirm with the user which one is the deployed/maintained version before extending either
-- `-k/--insecure` skips TLS verification — never default this on, it's meant for local/dev registries only. It does **not** by itself permit credentials over plain HTTP; that needs `--insecure-allow-credentials`
+- `-k/--insecure` means plain HTTP on the oras path and unverified TLS on the crane path — two different things, one flag. Never default this on, it's meant for local/dev registries only. It does **not** by itself permit credentials over plain HTTP; that needs `--insecure-allow-credentials`
 - Credentials: `UNPACKER_USERNAME`/`UNPACKER_PASSWORD` (the unprefixed `USERNAME`/`PASSWORD` still work but warn — Windows and many CI images set them)
 - `--mediatype` matches a full media type exactly, or a bare word against a whole component of it — not a raw substring
 - Layer compression (gzip / zstd / uncompressed tar) is detected from the bytes, not the media type suffix
-- Extraction limits apply to the tar and copy paths; only `runUmoci` is unbounded by them. `--max-total-bytes` is shared across a multi-layer artifact's layers, not applied per layer
+- The limits bound the **download** phase too: a blob is rejected on its declared size before it is fetched (`downloadBudget`). That trusts `desc.Size` where extraction deliberately distrusts `hdr.Size` — fine, because under-declaring still fails `VerifyReader`. Extraction limits apply to the tar and copy paths; only `runUmoci` is unbounded by them. `--max-total-bytes` is shared across a multi-layer artifact's layers, not applied per layer
 - `Unpack` extracts **every** layer whose media type matches, in manifest order (later layers overwrite earlier) — extracting only the first silently loses content
 - `Pull` returns the digest **as the registry served it** — for the crane path that is deliberately not the digest of the normalised manifest written to the OCI layout, because referrers attach to the served one
+- A referrer whose manifest names a different `subject` is rejected: digest verification proves the registry served what it advertised, not that the artifact is about this image. One with no subject at all is skipped with a warning rather than rejected, so a registry whose fallback listing omits the field does not break `--with-referrers`
+- Extraction creates directories and regular files only. Links, devices and FIFOs are counted, logged and skipped **by design** — that is why the 2026 link-handling CVEs never applied here. Do not add link support
 - A registry without the referrers API is a no-op, not an error: oras falls back to the referrers tag schema and an absent tag yields an empty list with no error
+- We do **not** use oras-go's file store or its tar-extraction helpers: `pullWithOras` writes blobs via `fetchBlobToFile` and extraction is our own `extractTar`. Keep it that way — it is why the oras-go extraction CVEs have never applied to us. It does **not** buy immunity generally: `repo.Referrers` goes through oras-go's `auth.Client`, so credential CVEs in that client *are* on our reachable path. `govulncheck` runs in CI for this reason

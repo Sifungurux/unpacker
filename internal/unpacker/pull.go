@@ -104,9 +104,51 @@ func newOrasRepository(cfg *Config) (*orasremote.Repository, error) {
 	return repo, nil
 }
 
+// downloadBudget bounds the download phase the way Limits bounds extraction.
+// Without it --max-total-bytes only applies once the bytes are already in
+// tmp/, so a registry declaring a 500 GB layer fills the disk before any limit
+// is consulted — on a shared CI runner that is a denial of service against
+// everything else on the box.
+//
+// This trusts desc.Size where extraction deliberately does not trust hdr.Size.
+// The difference is which way the lie has to go: a registry that over-declares
+// is rejected here, and one that under-declares still fails VerifyReader's
+// size check while the bytes are in flight, which is where they actually stop.
+type downloadBudget struct {
+	maxFile   int64
+	remaining int64
+}
+
+func newDownloadBudget(lim Limits) *downloadBudget {
+	lim = lim.withDefaults()
+	return &downloadBudget{maxFile: lim.MaxFileBytes, remaining: lim.MaxTotalBytes}
+}
+
+// charge reserves desc.Size against the budget before a byte is fetched.
+func (b *downloadBudget) charge(desc ocispec.Descriptor) error {
+	if b == nil {
+		return nil
+	}
+	if desc.Size > b.maxFile {
+		return fmt.Errorf("blob %s declares %d bytes, over the %d byte limit for a single file (--max-file-bytes)",
+			desc.Digest, desc.Size, b.maxFile)
+	}
+	if desc.Size > b.remaining {
+		return fmt.Errorf("blob %s declares %d bytes, past the %d byte total limit for this pull (--max-total-bytes)",
+			desc.Digest, desc.Size, b.remaining)
+	}
+	b.remaining -= desc.Size
+	return nil
+}
+
 // fetchBlobToFile writes the blob described by desc to destPath, hashing it in
-// flight and refusing to leave a file behind unless it matches desc.
-func fetchBlobToFile(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor, destPath string) error {
+// flight and refusing to leave a file behind unless it matches desc. budget
+// bounds what may be written before it is; a nil budget is unbounded.
+func fetchBlobToFile(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor, destPath string, budget *downloadBudget) error {
+	if err := budget.charge(desc); err != nil {
+		return err
+	}
+
 	rc, err := fetcher.Fetch(ctx, desc)
 	if err != nil {
 		return fmt.Errorf("fetch blob %s: %w", desc.Digest, err)
@@ -203,9 +245,12 @@ func craneFallbackReason(mediaType string, manifestBytes []byte) string {
 }
 
 // pullWithOras fetches the manifest and each layer blob directly from the registry.
-// It does not set PlainHTTP or TLS InsecureSkipVerify — plain-HTTP and
-// self-signed-cert registries will intentionally fail here and be handled by
-// the crane fallback, which has full insecure transport support when cfg.Insecure is true.
+//
+// --insecure means two different things across the two paths, which is worth
+// knowing before reading either: here it sets PlainHTTP (no TLS at all, via
+// newOrasRepository), while pullWithCrane sets InsecureSkipVerify (TLS, but
+// unverified). Both refuse to carry credentials without
+// --insecure-allow-credentials.
 func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) (string, error) {
 	repo, err := newOrasRepository(cfg)
 	if err != nil {
@@ -259,6 +304,10 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) (string, erro
 		return "", fmt.Errorf("parse manifest: %w", err)
 	}
 
+	// One budget for the whole pull: the total limit is shared across an
+	// artifact's layers, the same way it is during extraction.
+	budget := newDownloadBudget(cfg.Limits)
+
 	// fetch each layer blob directly and write to tmpDir
 	for _, layer := range m.Layers {
 		filename := layer.Annotations["org.opencontainers.image.title"]
@@ -278,7 +327,7 @@ func pullWithOras(ctx context.Context, cfg *Config, tmpDir string) (string, erro
 			Size:      layer.Size,
 		}
 
-		if err := fetchBlobToFile(ctx, repo, layerDesc, filepath.Join(tmpDir, filename)); err != nil {
+		if err := fetchBlobToFile(ctx, repo, layerDesc, filepath.Join(tmpDir, filename), budget); err != nil {
 			return "", err
 		}
 	}
@@ -293,6 +342,15 @@ func pullWithCrane(ctx context.Context, cfg *Config) (string, error) {
 	opts := []crane.Option{crane.WithContext(ctx)}
 
 	if cfg.Insecure {
+		// Same guard as newOrasRepository, for the same reason: an
+		// unverified certificate is a certificate an interceptor can
+		// present, so basic auth over it is basic auth handed away. This
+		// path carries more traffic than the oras one — every image index
+		// and every Docker manifest routes here.
+		if cfg.Creds != nil && cfg.Creds.Username != "" && !cfg.AllowInsecureCredentials {
+			return "", fmt.Errorf("refusing to send credentials over unverified TLS to %s: "+
+				"re-run with --insecure-allow-credentials if that is intended", cfg.Image)
+		}
 		transport := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		}
@@ -325,6 +383,25 @@ func pullWithCrane(ctx context.Context, cfg *Config) (string, error) {
 		return "", fmt.Errorf("resolve image digest: %w", err)
 	}
 	img = ociImage{img}
+
+	// crane.Pull is lazy — it has the manifest and none of the blobs, so the
+	// declared sizes are known here and the bytes are not yet on disk.
+	// AppendImage below is what writes them. This is the majority path (every
+	// Docker manifest, every index, every image with an image config), so
+	// leaving it unbounded would leave the limits covering the smaller half.
+	manifest, err := img.Manifest()
+	if err != nil {
+		return "", fmt.Errorf("read manifest: %w", err)
+	}
+	budget := newDownloadBudget(cfg.Limits)
+	for _, desc := range append([]v1.Descriptor{manifest.Config}, manifest.Layers...) {
+		if err := budget.charge(ocispec.Descriptor{
+			Digest: digest.Digest(desc.Digest.String()),
+			Size:   desc.Size,
+		}); err != nil {
+			return "", err
+		}
+	}
 
 	// write as OCI layout so umoci can unpack it.
 	// tag annotation is required so umoci can resolve the image by name.

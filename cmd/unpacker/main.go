@@ -31,6 +31,7 @@ func rootCmd() *cobra.Command {
 	var maxTotalBytes int64
 	var maxFileBytes int64
 	var maxEntries int
+	var maxReferrers int
 
 	cmd := &cobra.Command{
 		Use:     "unpacker IMAGE",
@@ -52,6 +53,7 @@ func rootCmd() *cobra.Command {
 				Insecure:                 insecure,
 				AllowInsecureCredentials: allowInsecureCredentials,
 				WithReferrers:            withReferrers,
+				MaxReferrers:             maxReferrers,
 				Creds:                    creds,
 				Limits: unpacker.Limits{
 					MaxTotalBytes: maxTotalBytes,
@@ -103,6 +105,8 @@ func rootCmd() *cobra.Command {
 		"Maximum bytes written for a single file in an archive")
 	cmd.Flags().IntVar(&maxEntries, "max-entries", unpacker.DefaultMaxEntries,
 		"Maximum number of entries in an archive")
+	cmd.Flags().IntVar(&maxReferrers, "max-referrers", unpacker.DefaultMaxReferrers,
+		"Maximum number of referrers to download for one image")
 
 	return cmd
 }

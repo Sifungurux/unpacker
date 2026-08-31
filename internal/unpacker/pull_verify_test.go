@@ -215,3 +215,46 @@ func TestPullWithOras_ReferenceForms(t *testing.T) {
 		})
 	}
 }
+
+// --max-total-bytes used to apply only at extraction, by which point the bytes
+// were already in tmp/ — so a registry declaring an enormous layer filled the
+// disk before any limit was consulted.
+func TestPullWithOras_RejectsOversizedLayerBeforeFetching(t *testing.T) {
+	addr := startRegistry(t, "")
+	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/toobig"))
+	cfg.Limits = Limits{MaxFileBytes: 1, MaxTotalBytes: 1 << 20, MaxEntries: 10}
+
+	_, err := pullWithOras(context.Background(), cfg, tmpDir)
+	if err == nil {
+		t.Fatal("expected a layer over --max-file-bytes to be rejected")
+	}
+	if !strings.Contains(err.Error(), "--max-file-bytes") {
+		t.Errorf("error = %q, want it to name --max-file-bytes", err)
+	}
+
+	// Rejected before fetching, so nothing reached tmp/.
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("read tmp: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("tmp/ = %v, want no blob written for a rejected layer", entries)
+	}
+}
+
+// The total is shared across an artifact's layers here the same way it is
+// during extraction, so a pull cannot be split past the limit one blob at a
+// time.
+func TestPullWithOras_RejectsLayersPastTheTotalBudget(t *testing.T) {
+	addr := startRegistry(t, "")
+	cfg, tmpDir := orasTestConfig(t, pushOCIArtifact(t, addr, "test/overbudget"))
+	cfg.Limits = Limits{MaxFileBytes: 1 << 20, MaxTotalBytes: 1, MaxEntries: 10}
+
+	_, err := pullWithOras(context.Background(), cfg, tmpDir)
+	if err == nil {
+		t.Fatal("expected layers past --max-total-bytes to be rejected")
+	}
+	if !strings.Contains(err.Error(), "--max-total-bytes") {
+		t.Errorf("error = %q, want it to name --max-total-bytes", err)
+	}
+}

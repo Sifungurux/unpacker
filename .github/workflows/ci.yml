@@ -29,3 +29,9 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -race -count=1
+
+      # Catches a dependency going bad between reviews, on the PR that
+      # would ship it rather than in a monthly audit. oras-go's auth
+      # client is on the reachable path (see CLAUDE.md), so a credential
+      # CVE there is not free for us.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

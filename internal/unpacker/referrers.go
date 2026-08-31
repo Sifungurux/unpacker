@@ -71,11 +71,31 @@ func FetchReferrers(ctx context.Context, cfg *Config, subjectDigest string) (*Re
 		return result, WriteResult(cfg, result)
 	}
 
+	if max := cfg.maxReferrers(); len(descs) > max {
+		return nil, fmt.Errorf("registry listed %d referrers for %s, over the limit of %d (--max-referrers)",
+			len(descs), subjectDigest, max)
+	}
+
+	// Shared with the pull phase in spirit but not in state: referrers are a
+	// separate download, so they get their own budget rather than eating the
+	// artifact's.
+	budget := newDownloadBudget(cfg.Limits)
+
 	baseDir := filepath.Join(cfg.OutputDir, "referrers")
 	for _, desc := range descs {
-		ref, err := downloadReferrer(ctx, repo, desc, baseDir)
+		ref, err := downloadReferrer(ctx, repo, desc, baseDir, subject, budget)
 		if err != nil {
+			// Referrers are fetched after Unpack has already published
+			// image/, so returning here without a result.json would leave a
+			// complete-looking tree next to the *previous* run's result.
+			// Record what did land, then fail.
+			if writeErr := WriteResult(cfg, result); writeErr != nil {
+				return nil, fmt.Errorf("%w (and writing result.json failed: %v)", err, writeErr)
+			}
 			return nil, err
+		}
+		if ref.Digest == "" {
+			continue // skipped: see downloadReferrer
 		}
 		log.Printf("referrer %s (%s) -> %s", desc.Digest, ref.ArtifactType, ref.Path)
 		result.Referrers = append(result.Referrers, ref)
@@ -86,7 +106,13 @@ func FetchReferrers(ctx context.Context, cfg *Config, subjectDigest string) (*Re
 
 // downloadReferrer writes one referrer's manifest and its layer blobs under
 // baseDir, returning what was written.
-func downloadReferrer(ctx context.Context, repo content.Fetcher, desc ocispec.Descriptor, baseDir string) (Referrer, error) {
+// A zero Referrer with a nil error means the referrer was skipped, not that
+// nothing went wrong.
+func downloadReferrer(ctx context.Context, repo content.Fetcher, desc ocispec.Descriptor, baseDir string, subject digest.Digest, budget *downloadBudget) (Referrer, error) {
+	if err := budget.charge(desc); err != nil {
+		return Referrer{}, fmt.Errorf("referrer %s: %w", desc.Digest, err)
+	}
+
 	// FetchAll verifies the bytes against desc before returning them
 	manifestBytes, err := content.FetchAll(ctx, repo, desc)
 	if err != nil {
@@ -97,8 +123,31 @@ func downloadReferrer(ctx context.Context, repo content.Fetcher, desc ocispec.De
 		ArtifactType string               `json:"artifactType"`
 		Config       ocispec.Descriptor   `json:"config"`
 		Layers       []ocispec.Descriptor `json:"layers"`
+		Subject      *ocispec.Descriptor  `json:"subject"`
 	}
 	parseErr := json.Unmarshal(manifestBytes, &m)
+
+	// Digest verification proves the registry served the bytes it advertised.
+	// It does not prove the artifact claims to be about *this* image. On the
+	// referrers-tag-schema fallback the listing is an ordinary tag whose
+	// contents the registry controls outright, so without this check a
+	// compromised registry can file a genuine, correctly-signed SBOM
+	// belonging to some other benign image under this digest.
+	switch {
+	case m.Subject != nil && m.Subject.Digest != subject:
+		return Referrer{}, fmt.Errorf("referrer %s claims subject %s, not %s: refusing to file it under this image",
+			desc.Digest, m.Subject.Digest, subject)
+	case m.Subject == nil:
+		// Per OCI 1.1 a referrer is defined by having a subject, so this
+		// should not happen — but rejecting the run would break
+		// --with-referrers against any registry whose fallback listing omits
+		// it. Skipping keeps unverifiable content off disk without turning a
+		// working pull into a failure.
+		// ponytail: skip-and-warn for compatibility; make it a hard error
+		// once no real registry is seen doing this.
+		log.Printf("referrer %s declares no subject — skipped, as nothing ties it to %s", desc.Digest, subject)
+		return Referrer{}, nil
+	}
 
 	// The manifest is the authoritative source for the artifact type. Some
 	// registries fill the referrers index entry from config.mediaType instead
@@ -137,7 +186,7 @@ func downloadReferrer(ctx context.Context, repo content.Fetcher, desc ocispec.De
 		if name == "" {
 			name = fmt.Sprintf("layer-%d", i)
 		}
-		if err := fetchBlobToFile(ctx, repo, layer, filepath.Join(dir, name)); err != nil {
+		if err := fetchBlobToFile(ctx, repo, layer, filepath.Join(dir, name), budget); err != nil {
 			return Referrer{}, fmt.Errorf("referrer %s: %w", desc.Digest, err)
 		}
 		ref.Files = append(ref.Files, name)

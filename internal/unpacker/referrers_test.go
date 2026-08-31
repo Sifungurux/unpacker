@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -231,4 +232,121 @@ func slicesContains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// pushReferrerManifest pushes a referrer manifest declaring an arbitrary
+// subject and returns its descriptor. subject == nil omits the field.
+func pushReferrerManifest(t *testing.T, cfg *Config, subject *ocispec.Descriptor) ocispec.Descriptor {
+	t.Helper()
+	ctx := context.Background()
+
+	repo, err := newOrasRepository(cfg)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	manifestBytes, err := json.Marshal(ocispec.Manifest{
+		Versioned:    specs.Versioned{SchemaVersion: 2},
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: "application/spdx+json",
+		Config:       ocispec.DescriptorEmptyJSON,
+		Subject:      subject,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	desc := ocispec.Descriptor{
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: "application/spdx+json",
+		Digest:       digest.FromBytes(manifestBytes),
+		Size:         int64(len(manifestBytes)),
+	}
+	if err := repo.Push(ctx, desc, bytes.NewReader(manifestBytes)); err != nil {
+		t.Fatalf("push manifest: %v", err)
+	}
+	return desc
+}
+
+// The forgery this guards against needs a registry that lies, so it cannot be
+// staged through the honest in-process registry's referrers API — that indexes
+// by the subject in the manifest and would never list a mismatched entry under
+// our digest. downloadReferrer is where the check lives and where a
+// registry-supplied descriptor arrives, so that is the level to test it at.
+func TestDownloadReferrer_RejectsMismatchedSubject(t *testing.T) {
+	addr := startRegistry(t, "", registry.WithReferrersSupport(true))
+	cfg, _ := orasTestConfig(t, pushOCIArtifact(t, addr, "test/badsubject"))
+
+	other := digest.FromString("some other image entirely")
+	desc := pushReferrerManifest(t, cfg, &ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    other,
+		Size:      42,
+	})
+
+	repo, err := newOrasRepository(cfg)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	ours := digest.FromString("the image we asked about")
+	baseDir := filepath.Join(cfg.OutputDir, "referrers")
+
+	ref, err := downloadReferrer(context.Background(), repo, desc, baseDir, ours, nil)
+	if err == nil {
+		t.Fatal("expected a referrer claiming another subject to be rejected")
+	}
+	if !strings.Contains(err.Error(), other.String()) {
+		t.Errorf("error = %q, want it to name the mismatched subject", err)
+	}
+	if ref.Digest != "" {
+		t.Errorf("ref = %+v, want nothing returned", ref)
+	}
+	if _, statErr := os.Stat(baseDir); !os.IsNotExist(statErr) {
+		t.Errorf("referrers/ exists; want nothing written for a rejected referrer")
+	}
+}
+
+// Unverifiable rather than forged: skipped, so it stays off disk, but not
+// fatal, so --with-referrers keeps working against a registry whose fallback
+// listing omits the field.
+func TestDownloadReferrer_SkipsSubjectlessReferrer(t *testing.T) {
+	addr := startRegistry(t, "", registry.WithReferrersSupport(true))
+	cfg, _ := orasTestConfig(t, pushOCIArtifact(t, addr, "test/nosubject"))
+	desc := pushReferrerManifest(t, cfg, nil)
+
+	repo, err := newOrasRepository(cfg)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	baseDir := filepath.Join(cfg.OutputDir, "referrers")
+
+	ref, err := downloadReferrer(context.Background(), repo, desc,
+		baseDir, digest.FromString("the image we asked about"), nil)
+	if err != nil {
+		t.Fatalf("a subjectless referrer should be skipped, not fatal: %v", err)
+	}
+	if ref.Digest != "" {
+		t.Errorf("ref = %+v, want the zero Referrer that means skipped", ref)
+	}
+	if _, statErr := os.Stat(baseDir); !os.IsNotExist(statErr) {
+		t.Errorf("referrers/ exists; want nothing written for a skipped referrer")
+	}
+}
+
+// The listing is registry-controlled and each entry is a separate download.
+func TestFetchReferrers_RejectsTooManyReferrers(t *testing.T) {
+	addr := startRegistry(t, "", registry.WithReferrersSupport(true))
+	cfg, _ := orasTestConfig(t, pushOCIArtifact(t, addr, "test/manyrefs"))
+	cfg.MaxReferrers = 1
+
+	var subject ocispec.Descriptor
+	for _, title := range []string{"a.json", "b.json"} {
+		subject = pushReferrer(t, cfg, "application/spdx+json", title, []byte(testSBOM+title))
+	}
+
+	_, err := FetchReferrers(context.Background(), cfg, subject.Digest.String())
+	if err == nil {
+		t.Fatal("expected more referrers than --max-referrers to be an error")
+	}
+	if !strings.Contains(err.Error(), "--max-referrers") {
+		t.Errorf("error = %q, want it to name --max-referrers", err)
+	}
 }

@@ -553,3 +553,65 @@ func TestExtractTar_UnsupportedCompressionIsNamed(t *testing.T) {
 		t.Errorf("error = %q, want it to not blame gzip", err)
 	}
 }
+
+// Link and device entries are refused by construction, not by validation:
+// there is no moment between checking a link target and acting on it, because
+// the link is never created. That is what kept unpacker clear of the 2026
+// extraction CVEs, so it gets a test to stop a refactor restoring "support".
+func TestExtractTar_SkipsLinkAndDeviceEntries(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("untouched"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	headers := []*tar.Header{
+		{Name: "escape", Typeflag: tar.TypeSymlink, Linkname: outside, Mode: 0777},
+		{Name: "up", Typeflag: tar.TypeSymlink, Linkname: "../../etc/passwd", Mode: 0777},
+		{Name: "hard", Typeflag: tar.TypeLink, Linkname: "../outside.txt", Mode: 0644},
+		{Name: "pipe", Typeflag: tar.TypeFifo, Mode: 0644},
+		{Name: "disk", Typeflag: tar.TypeBlock, Mode: 0644, Devmajor: 8, Devminor: 0},
+		{Name: "real.txt", Typeflag: tar.TypeReg, Mode: 0644, Size: 2},
+	}
+	for _, h := range headers {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			if _, err := tw.Write([]byte("ok")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, closer := range []func() error{tw.Close, gz.Close} {
+		if err := closer(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tarPath := filepath.Join(t.TempDir(), "links.tar.gz")
+	if err := os.WriteFile(tarPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	if err := ExtractTar(tarPath, destDir, Limits{MaxFileBytes: 1 << 20, MaxTotalBytes: 1 << 20, MaxEntries: 100}); err != nil {
+		t.Fatalf("unsupported entries should be skipped, not fatal: %v", err)
+	}
+
+	// Lstat, not Stat: a dangling symlink Stats as absent and would pass.
+	for _, name := range []string{"escape", "up", "hard", "pipe", "disk"} {
+		if _, err := os.Lstat(filepath.Join(destDir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s: want not created, Lstat err = %v", name, err)
+		}
+	}
+	// The regular file still lands — skipping is per-entry, not per-archive.
+	if body, err := os.ReadFile(filepath.Join(destDir, "real.txt")); err != nil || string(body) != "ok" {
+		t.Errorf("real.txt = %q, %v; want the regular entry extracted", body, err)
+	}
+	// A hardlink resolved against the process CWD is the CVE-2026-50163 shape.
+	if body, err := os.ReadFile(outside); err != nil || string(body) != "untouched" {
+		t.Errorf("file outside destDir = %q, %v; want it untouched", body, err)
+	}
+}

@@ -342,3 +342,33 @@ func TestPull_OCIImageManifest_ProducesAnUnpackableLayout(t *testing.T) {
 		t.Fatalf("no oci-layout written for an OCI image manifest (%v) -- umoci rejects this directory", err)
 	}
 }
+
+// The crane path handles every Docker manifest, every index and every image
+// with an image config — the majority of pulls and the largest inputs. Bounding
+// only the oras path would have left the limits covering the smaller half.
+func TestPull_CraneRejectsOversizedLayerBeforeWriting(t *testing.T) {
+	addr := startRegistry(t, "")
+	image := pushOCIIndex(t, addr, "test/craneoversize")
+
+	outputDir := t.TempDir()
+	cfg := &Config{
+		Image:     image,
+		OutputDir: outputDir,
+		Insecure:  true,
+		Creds:     &Credentials{Public: true},
+		Limits:    Limits{MaxFileBytes: 1, MaxTotalBytes: 1 << 20, MaxEntries: 10},
+	}
+
+	_, err := Pull(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected a layer over --max-file-bytes to be rejected on the crane path")
+	}
+	if !strings.Contains(err.Error(), "--max-file-bytes") {
+		t.Errorf("error = %q, want it to name --max-file-bytes", err)
+	}
+
+	// crane.Pull is lazy, so the rejection lands before any blob is written.
+	if _, statErr := os.Stat(filepath.Join(outputDir, "tmp", "blobs")); !os.IsNotExist(statErr) {
+		t.Errorf("blobs/ exists; want nothing written for a rejected pull")
+	}
+}
