@@ -32,6 +32,8 @@ func rootCmd() *cobra.Command {
 	var maxFileBytes int64
 	var maxEntries int
 	var maxReferrers int
+	var verifyIdentity, verifyIssuer, verifyKey string
+	var verifyTrustedRoot, verifyTUFMirror, verifyTUFRoot string
 
 	cmd := &cobra.Command{
 		Use:     "unpacker IMAGE",
@@ -40,6 +42,21 @@ func rootCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			image := args[0]
+
+			verifyCfg := unpacker.VerifyConfig{
+				CosignIdentity:   verifyIdentity,
+				CosignOIDCIssuer: verifyIssuer,
+				CosignKeyPath:    verifyKey,
+				TrustedRootPath:  verifyTrustedRoot,
+				TUFMirror:        verifyTUFMirror,
+				TUFRootPath:      verifyTUFRoot,
+			}
+			// Before anything that touches the network: a contradictory flag
+			// set should say so, not fail later on credentials and leave the
+			// real mistake unmentioned.
+			if err := verifyCfg.Validate(); err != nil {
+				return err
+			}
 
 			creds, err := unpacker.Resolve(configPath, public)
 			if err != nil {
@@ -55,6 +72,7 @@ func rootCmd() *cobra.Command {
 				WithReferrers:            withReferrers,
 				MaxReferrers:             maxReferrers,
 				Creds:                    creds,
+				Verify:                   verifyCfg,
 				Limits: unpacker.Limits{
 					MaxTotalBytes: maxTotalBytes,
 					MaxFileBytes:  maxFileBytes,
@@ -69,24 +87,39 @@ func rootCmd() *cobra.Command {
 				return fmt.Errorf("pull: %w", err)
 			}
 
+			// Signatures are attached as referrers, so a verify run has to
+			// fetch them whether or not --with-referrers was asked for. That
+			// makes verification imply it: the bundle a run was accepted on is
+			// worth keeping next to the artifact it vouches for.
+			result := &unpacker.Result{Image: image, Digest: resolved, Referrers: []unpacker.Referrer{}}
+			if withReferrers || verifyCfg.Requested() {
+				result, err = unpacker.FetchReferrers(ctx, cfg, resolved)
+				if err != nil {
+					return fmt.Errorf("referrers: %w", err)
+				}
+			} else if err := unpacker.WriteResult(cfg, result); err != nil {
+				return err
+			}
+
+			// Verification gates the unpack rather than following it: Unpack
+			// publishes image/ by renaming a staging directory, so a refused
+			// signature must be refused before that happens.
+			if verifyCfg.Requested() {
+				record, verifyErr := unpacker.Verify(cfg, resolved, result)
+				result.Verification = record
+				if writeErr := unpacker.WriteResult(cfg, result); writeErr != nil {
+					return writeErr
+				}
+				if verifyErr != nil {
+					return fmt.Errorf("verify: %w", verifyErr)
+				}
+			}
+
 			if err := unpacker.Unpack(cfg); err != nil {
 				return fmt.Errorf("unpack: %w", err)
 			}
 
-			// result.json records what was resolved either way; FetchReferrers
-			// writes it itself once it knows what it downloaded.
-			if withReferrers {
-				if _, err := unpacker.FetchReferrers(ctx, cfg, resolved); err != nil {
-					return fmt.Errorf("referrers: %w", err)
-				}
-				return nil
-			}
-
-			return unpacker.WriteResult(cfg, &unpacker.Result{
-				Image:     image,
-				Digest:    resolved,
-				Referrers: []unpacker.Referrer{},
-			})
+			return nil
 		},
 	}
 
@@ -107,6 +140,18 @@ func rootCmd() *cobra.Command {
 		"Maximum number of entries in an archive")
 	cmd.Flags().IntVar(&maxReferrers, "max-referrers", unpacker.DefaultMaxReferrers,
 		"Maximum number of referrers to download for one image")
+	cmd.Flags().StringVar(&verifyIdentity, "verify-cosign-identity", "",
+		"Verify a cosign signature keylessly: regex the Fulcio certificate SAN must match")
+	cmd.Flags().StringVar(&verifyIssuer, "verify-cosign-oidc-issuer", "",
+		"OIDC issuer the signing certificate must come from (required with --verify-cosign-identity)")
+	cmd.Flags().StringVar(&verifyKey, "verify-cosign-key", "",
+		"Verify a cosign signature against this public key instead of a certificate identity")
+	cmd.Flags().StringVar(&verifyTrustedRoot, "verify-trusted-root", "",
+		"Path to a trusted_root.json for a private Sigstore cluster")
+	cmd.Flags().StringVar(&verifyTUFMirror, "verify-tuf-mirror", "",
+		"TUF repository URL for a private Sigstore cluster")
+	cmd.Flags().StringVar(&verifyTUFRoot, "verify-tuf-root", "",
+		"Path to the TUF bootstrap root.json (used with --verify-tuf-mirror)")
 
 	return cmd
 }

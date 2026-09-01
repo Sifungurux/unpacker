@@ -30,6 +30,7 @@ type Config struct {
 	WithReferrers            bool
 	MaxReferrers             int
 	Creds                    *Credentials
+	Verify                   VerifyConfig
 	Limits
 }
 

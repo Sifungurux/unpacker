@@ -21,6 +21,9 @@ type Result struct {
 	Image     string     `json:"image"`
 	Digest    string     `json:"digest"`
 	Referrers []Referrer `json:"referrers"`
+	// Verification is nil when no verify flag was passed. That has to stay
+	// distinguishable from a failed verification: absent means nobody asked.
+	Verification *Verification `json:"verification,omitempty"`
 }
 
 // Referrer is one artifact attached to the pulled image — an SBOM, an in-toto

@@ -26,6 +26,12 @@ Options:
       --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
       --max-entries      int    Max entries in an archive (default: 100000)
       --max-referrers    int    Max referrers to download for one image (default: 100)
+      --verify-cosign-identity  string  Keyless: regex the Fulcio cert SAN must match
+      --verify-cosign-oidc-issuer url   Keyless: required with the above
+      --verify-cosign-key       path    Key-based: a cosign public key
+      --verify-trusted-root     path    Private cluster: static trusted_root.json
+      --verify-tuf-mirror       url     Private cluster: TUF repository
+      --verify-tuf-root         path    Private cluster: TUF bootstrap root.json
   -v, --version                Print version
   -h, --help                   Show help
 ```
@@ -299,3 +305,55 @@ unpacker/
     ├── specs/                    Design document
     └── plans/                    Implementation plan
 ```
+
+## Signature verification
+
+Verification is a precondition of unpacking, not a step after it: a refused
+signature means no `image/` directory is ever published.
+
+Requesting verification implies `--with-referrers`: the signature *is* a
+referrer, so it has to be fetched, and the bundle a run was accepted on is kept
+next to the artifact it vouches for. Referrers are now also fetched **before**
+the unpack rather than after it, so a referrer that fails its subject check now
+fails the run before `image/` is published rather than after.
+
+```bash
+# public Sigstore, keyless
+unpacker --verify-cosign-identity '^https://github\.com/myorg/.*' \
+         --verify-cosign-oidc-issuer https://token.actions.githubusercontent.com \
+         -o ./out ghcr.io/myorg/app:v1
+
+# private cluster, static trust material
+unpacker --verify-trusted-root ./trusted_root.json \
+         --verify-cosign-identity '^https://gitlab.corp/myorg/.*' \
+         --verify-cosign-oidc-issuer https://gitlab.corp \
+         -o ./out registry.corp/app:v1
+
+# private cluster, TUF
+unpacker --verify-tuf-mirror https://tuf.corp --verify-tuf-root ./root.json ...
+
+# a plain cosign key, no Fulcio and no cluster
+unpacker --verify-cosign-key ./cosign.pub -o ./out registry.corp/app:v1
+```
+
+Signatures are discovered **through the OCI 1.1 referrers API only** — what
+`cosign sign --registry-referrers-mode oci-1-1` attaches. cosign's legacy
+`sha256-<hex>.sig` tag scheme is not consulted, so an artifact signed that way
+reads as unsigned and the run fails rather than passing.
+
+### What gets recorded
+
+`result.json` gains a `verification` object naming the mode, the identity or key,
+the trust source, the bundle digests checked, and where the timestamp came from.
+Its absence means verification was never requested — that distinction is
+deliberate and unambiguous.
+
+`timestampSource` is worth reading. **Rekor v2 issues no inclusion promise**, so
+against a Rekor-v2 cluster with no timestamp authority there is no signed
+attestation of *when* a signature was made. Log inclusion is still fully
+verified; only the time is unproven, and the field says `none-rekor-v2` rather
+than implying the log vouched for it. Add a timestamp authority to the cluster
+if you need that gap closed.
+
+A trusted root with neither a Rekor log nor a timestamp authority is refused
+outright: nothing would attest to the signature at all.
