@@ -156,44 +156,46 @@ The integration suite must still pass.
 Notation, `--platform`, structured exit codes, bounding `runUmoci`,
 `--timeout`, release signing.
 
-## Known gap: the artifact a cosign image signature actually covers
+## Resolved: what a cosign image signature actually covers
 
-**Status: open. The keyless and key-based machinery is complete and tested, but
-the artifact binding is not yet correct for signatures produced by the real
-`cosign` binary.**
+An earlier revision of this document recorded the artifact binding as broken,
+from reading `cmd/cosign/cli/sign/sign.go:244` where cosign builds a
+simple-signing payload carrying `critical.image.docker-manifest-digest` and
+signs those bytes. That reading was of the **legacy** path.
 
-`newSignatureVerifier` binds with
-`verify.WithArtifactDigest("sha256", <resolved manifest digest>)`. Reading
-cosign v3.1.3 shows that is right for *attestations* and wrong for *signatures*:
+Signing a real image with cosign v3.1.3 settles it. `--new-bundle-format`
+defaults to true, and the bundle it produces is a **DSSE envelope** wrapping an
+in-toto Statement:
 
-- `cmd/cosign/cli/sign/sign.go:244` builds a simple-signing payload
-  (`sigPayload.Cosign`) carrying `critical.image.docker-manifest-digest`, and
-  `:302` signs **those payload bytes** via `sign.PlainData{Data: payload}`.
-- So a signature bundle's `messageSignature.messageDigest` is
-  `sha256(payload)`, not the manifest digest.
-- cosign's own `verifyImageAttestationsSigstoreBundle` uses
-  `WithArtifactDigest(image digest)` because an in-toto statement names the
-  image as its subject. The signature path instead goes through
-  `sig.Payload()`.
+```json
+{"_type":"https://in-toto.io/Statement/v1",
+ "subject":[{"digest":{"sha256":"bc15499c…"}}],
+ "predicateType":"https://sigstore.dev/cosign/sign/v1",
+ "predicate":{}}
+```
 
-The tests do not catch this because they sign exactly the bytes the policy
-expects: the fixture defines the contract instead of testing it. That is also
-why `TestVerify_AttachedBundleCarriesASubject` currently proves only that
-`attachBundle` sets a subject.
+The statement's subject digest **is** the image manifest digest, so
+`verify.WithArtifactDigest(<resolved digest>)` is the correct binding. The
+referrer carries `artifactType: application/vnd.dev.sigstore.bundle.v0.3+json`
+and a `subject` naming the image, so discovery and the v0.8.0 subject check
+both work unchanged.
 
-Today's behaviour is safe but not useful for image signatures: a genuine cosign
-signature is *refused*, not falsely accepted.
+Confirmed end to end against a local registry: a genuine signature verifies, a
+different key is refused with no `image/` published, and the same signature is
+refused against a different resolved digest.
+`TestVerify_RealCosignV3Bundle` pins this using the captured bundle in
+`testdata/`, so the contract is no longer self-defined by a fixture.
 
-The fix, once a real bundle settles where the payload bytes live on the
-registry in referrers mode:
+### Remaining limitation
 
-1. Bind the artifact to the payload bytes rather than the manifest digest.
-2. Parse the payload and require
-   `critical.image.docker-manifest-digest == <resolved digest>`, which is the
-   check that actually ties a signature to this image.
-3. Replace the fixtures with one real `cosign sign --registry-referrers-mode
-   oci-1-1` bundle checked into testdata, so the contract stops being
-   self-defined.
+`cosign sign --new-bundle-format=false` produces the legacy simple-signing
+payload, whose signature does not cover the manifest digest. Those signatures
+are **refused**, not falsely accepted. The flag is deprecated upstream ("this
+will be the only supported format in future versions"), so this is a
+documented limitation rather than planned work.
 
-`--verify-cosign-key` over a plain blob is unaffected; only the container-image
-signature path is wrong.
+Signatures pushed to cosign's legacy `sha256-<hex>.sig` tag are likewise not
+consulted. Note this is distinct from the OCI 1.1 referrers *fallback tag*
+(`sha256-<hex>`, no suffix), which oras reads and which was exercised in the
+end-to-end check above — the local registry had no referrers API and cosign
+fell back to it.

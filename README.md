@@ -337,9 +337,13 @@ unpacker --verify-cosign-key ./cosign.pub -o ./out registry.corp/app:v1
 ```
 
 Signatures are discovered **through the OCI 1.1 referrers API only** — what
-`cosign sign --registry-referrers-mode oci-1-1` attaches. cosign's legacy
-`sha256-<hex>.sig` tag scheme is not consulted, so an artifact signed that way
-reads as unsigned and the run fails rather than passing.
+`cosign sign --registry-referrers-mode oci-1-1` attaches. Where a registry has
+no referrers API, oras reads the OCI 1.1 fallback tag, so that case works too.
+
+Two things are deliberately not consulted, and both fail closed rather than
+passing: cosign's legacy `sha256-<hex>.sig` tag scheme, and signatures made
+with `--new-bundle-format=false`, whose legacy simple-signing payload does not
+cover the manifest digest. That flag is deprecated upstream.
 
 ### What gets recorded
 

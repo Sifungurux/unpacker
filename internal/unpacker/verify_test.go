@@ -440,3 +440,59 @@ func TestVerifyConfig_NotRequestedByDefault(t *testing.T) {
 		t.Errorf("the zero VerifyConfig must validate: %v", err)
 	}
 }
+
+// A signature produced by the real cosign binary, captured from
+//
+//	cosign sign --registry-referrers-mode oci-1-1 --key cosign.key \
+//	    localhost:5555/test/app@sha256:bc15499c...
+//
+// with cosign v3.1.3. The other tests in this file sign exactly the bytes the
+// policy expects, so they cannot catch a wrong artifact binding -- the fixture
+// would just define the contract. This one is ground truth: it pins that
+// cosign v3 wraps an in-toto Statement whose subject digest is the *image
+// manifest digest*, which is what makes WithArtifactDigest(resolved digest)
+// the correct binding.
+//
+// If cosign changes what it signs, this test fails and the binding needs
+// revisiting. That is the point of it.
+const realCosignSubject = "sha256:bc15499cd1b3d5322682d5008879149408494616eaacd975ed0caa9ddda42dee"
+
+func TestVerify_RealCosignV3Bundle(t *testing.T) {
+	outputDir := t.TempDir()
+	refPath := filepath.Join("referrers", "sig", "abc")
+	if err := os.MkdirAll(filepath.Join(outputDir, refPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join("testdata", "cosign-v3-image-signature.sigstore.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, refPath, "bundle.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		OutputDir: outputDir,
+		Verify:    VerifyConfig{CosignKeyPath: filepath.Join("testdata", "cosign-v3-image-signature.pub")},
+	}
+	result := &Result{Referrers: []Referrer{{
+		ArtifactType: CosignBundleArtifactType,
+		Path:         refPath,
+		Files:        []string{"manifest.json", "bundle.json"},
+	}}}
+
+	rec, err := Verify(cfg, realCosignSubject, result)
+	if err != nil {
+		t.Fatalf("a real cosign v3 signature should verify: %v", err)
+	}
+	if !rec.Verified {
+		t.Error("verified = false on a genuine cosign signature")
+	}
+
+	// And the binding has to be to *this* image, not merely to a well-formed
+	// bundle: the same signature must be refused under another digest.
+	other := digest.FromString("a different image entirely").String()
+	if _, err := Verify(cfg, other, result); err == nil {
+		t.Error("expected the signature to be refused against a different resolved digest")
+	}
+}
