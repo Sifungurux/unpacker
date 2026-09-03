@@ -1,10 +1,20 @@
 # unpacker — Technical Debt
 
-**Surveyed:** 2026-08-17 · **Commit:** `f62d7e3` (v0.6.0) · ~1,300 lines Go + a 427-line integration script
-**Status:** 11 of 12 done as of `1eac85a`. D7 stays open by design; D11 needs a decision (see below).
+**Surveyed:** 2026-08-17 (D1–D12) · re-surveyed 2026-09-03 (D13–D19)
+**Commit:** `1dfa1d6` (v0.9.0) · ~4,400 lines Go including tests, plus a 427-line integration script
+**Status:** D1–D12: ten done, D7 open by design, D11 needs a decision. D13–D19 are open.
+
+The second survey folds in what the 2026-08-31 supply-chain review left unfixed after v0.8.0
+and v0.9.0 shipped, plus two items from that work that neither review covers.
 
 Every item below was checked against the code or reproduced, not inferred. Each has a ready-to-paste prompt; the prompts are self-contained and each names how to prove the fix.
 
+**Start with D13 (the integration suite in CI).** D2 put unit tests on PRs and explicitly
+deferred the integration suite; that deferral was never picked up, so the media-type suite —
+the one that covers routing logic unit tests cannot reach — has still never run in CI, across
+three releases including a security release.
+
+The original advice, still true for D1–D12:
 **Start with D2 (CI on pull requests) regardless of what else you pick.** Nothing here — including the fixes for the other items — can be trusted to stay fixed while tests only run on release tags.
 
 Items already tracked in `~/Downloads/unpacker-scm-review-2026-08-16.md` (cosign verification, `--platform`, zstd, cloud keychain, exit codes, `pkg/` API) are **not** repeated here; this document covers debt in what exists rather than features that don't.
@@ -235,17 +245,351 @@ for. Do not "update" them — they are a record of a decision, not living docume
 
 ---
 
+
+# Second survey — 2026-09-03, at `1dfa1d6` (v0.9.0)
+
+What the 2026-08-31 supply-chain review left open after v0.8.0 and v0.9.0, plus two items from
+that work which neither review covers. Every item was confirmed against the code on this commit.
+
+---
+
+## Tier 1 — ships broken, or hides breakage
+
+### D13 · ⛔ open · The integration suite has never run in CI
+
+**What.** D2 added `ci.yml` with unit tests, `vet`, `gofmt` and (since v0.8.0) `govulncheck`,
+and its prompt said in as many words: *"Do not add the integration suite in this change."* That
+follow-up was never picked up. `scripts/test-integration.sh` — 427 lines, eight cases covering
+the routing and media-type logic unit tests cannot reach — runs only when someone remembers to
+run it locally.
+
+Three releases have shipped since, including a security release and a signature-verification
+release, both of which changed pull and unpack behaviour.
+
+**Evidence.**
+
+```
+$ grep -c test-integration .github/workflows/*.yml
+.github/workflows/ci.yml:0
+.github/workflows/release.yml:0
+```
+
+**Why it is Tier 1.** It is the same argument D2 made and it has not been answered. The suite
+is also the only thing that exercises the **built container image**, so the arm64 umoci fix
+(D1) and anything else baked into the image is currently verified by hand or not at all.
+
+**Options.**
+
+- **(a) Media-type suite only.** Needs `go`, `flux`, `helm`, `umoci`, `curl` and no daemon —
+  all installable on `ubuntu-latest`. Covers routing, media-type gating, multi-layer extraction.
+- **(b) (a) plus the container suite**, which additionally needs a working Docker/Podman and a
+  built image, and is the slower and flakier half.
+
+Recommend (a) now as a separate job, (b) only if it proves stable.
+
+**Prompt.**
+
+```text
+unpacker's scripts/test-integration.sh has never run in CI: .github/workflows/ci.yml runs only
+unit tests, vet, gofmt and govulncheck, and D2's prompt explicitly deferred the integration
+suite. Three releases have shipped since, two of which changed pull and unpack behaviour.
+
+Add a second job to ci.yml that runs the media-type half of the suite. It needs go, flux, helm,
+umoci and curl on the runner and no container daemon. Install flux, helm and umoci by pinned
+version with a checksum check, not by piping a script from the internet. Do not add the
+container suite in this change -- it needs a built image and is the flakier half; say so in a
+comment so the next person knows it was a decision.
+
+The script currently skips a suite when its prerequisites are missing. That is right locally and
+wrong in CI, where a silent skip is indistinguishable from a pass: add a flag or environment
+variable that makes a missing prerequisite a hard failure, and set it in the workflow.
+
+Verify by opening a PR and confirming the new job runs the media-type cases and reports them
+individually -- and by deliberately breaking one case in a scratch commit to confirm the job
+goes red rather than skipping.
+```
+
+---
+
+## Tier 2 — correctness and robustness
+
+### D14 · ⛔ open · `runUmoci` is outside the limit system
+
+**What.** `--max-total-bytes`, `--max-file-bytes` and `--max-entries` bound the tar and copy
+paths, and since v0.8.0 the download phase too. `runUmoci` shells out to the `umoci` binary with
+none of them. The container-image path handles the largest inputs of any route, so the
+decompression-bomb protection has its hole exactly where it is most needed.
+
+**Evidence.** `internal/unpacker/unpack.go:455` — `cmd := exec.Command("umoci", args...)`, no
+`Limits` in scope. `CLAUDE.md` documents this honestly ("only `runUmoci` is unbounded by them"),
+so it is a known hole rather than a surprise.
+
+**Options.**
+
+- **(a) Pre-check the layout.** Sum the OCI layout's declared layer sizes against the remaining
+  budget before invoking umoci. Cheap, and catches the declared-size case — but a layer that
+  lies about its size still expands unbounded.
+- **(b) Bound the child process.** `ulimit -f` or a disk quota on the umoci process. Catches
+  actual expansion, is platform-specific, and umoci's failure will be confusing.
+- **(c) Vendor umoci's Go API** (D1 option (b)) and bring the path inside the limit system
+  properly. Correct, and much the largest change.
+
+Recommend (a) now — it closes the declared-size case for one screen of code — and (c) as its own
+decision. Note (a) alone must not be described as bounding the umoci path; it bounds what the
+manifest *claims*.
+
+**Prompt.**
+
+```text
+internal/unpacker/unpack.go: runUmoci (around line 455) shells out to the umoci binary with no
+size or entry limit, so --max-total-bytes protects the tar and copy paths but not the
+container-image path, which handles the largest inputs. CLAUDE.md already records this.
+
+Before invoking umoci, read the OCI layout in tmp/ and sum its manifest's declared layer sizes
+against the run's MaxTotalBytes, failing with an error naming the flag if it would be exceeded.
+Reuse the downloadBudget type from pull.go rather than adding a second mechanism.
+
+Be precise in the comment and the docs about what this does and does not do: it bounds what the
+manifest declares, not what umoci actually writes, so a layer that under-declares its size still
+expands unbounded. Update CLAUDE.md's Key Facts and the README's limits section to say exactly
+that rather than implying the path is now bounded.
+
+Add a test that a layout whose declared layer sizes exceed --max-total-bytes is rejected before
+umoci is invoked, and confirm it fails without the guard.
+```
+
+### D15 · ⛔ open · No timeout and no signal handling
+
+**What.** `main.go` builds `context.Background()` and passes it to every network call. A
+registry that accepts a connection and then stalls hangs the process indefinitely. In a
+scheduled monitor pipeline that is a wedged job holding a runner, not a failed one that gets
+retried. Ctrl-C during a pull leaves `tmp/` and any staging directory behind.
+
+**Evidence.** `cmd/unpacker/main.go:83` — `ctx := context.Background()`.
+
+**Prompt.**
+
+```text
+cmd/unpacker/main.go builds ctx := context.Background() (around line 83), so a registry that
+accepts a connection and stalls hangs unpacker forever -- in a scheduled pipeline that is a
+wedged job rather than a failed one.
+
+Add a --timeout duration flag defaulting to 10m, and wrap the context with
+signal.NotifyContext for SIGINT and SIGTERM so Ctrl-C and a scheduler's termination both cancel
+the run rather than killing it mid-write. Make the timeout cover the whole run, not each
+request.
+
+On cancellation the staging directory Unpack uses must be cleaned up -- image/ is published by
+rename, so a cancelled run must leave no partial staging directory behind. tmp/ should still be
+left in place for debugging, as today.
+
+Distinguish the two in the error message: a timeout should say so and name --timeout, and a
+signal should say which signal, so a wedged job and an operator's Ctrl-C are not both "context
+canceled".
+
+Add a test using an httptest server that accepts and never responds, asserting the run fails
+within a short --timeout rather than hanging, and one asserting no staging directory survives.
+```
+
+### D16 · ⛔ open · Releases are unsigned, and the workflow's actions are not pinned
+
+**What.** `.goreleaser.yaml` produces `checksums.txt` and nothing else: no signature, no SBOM,
+no provenance. A tool whose headline v0.9.0 feature is *verifying other people's signatures*
+ships its own binaries unsigned. Separately, every workflow step is pinned to a mutable tag
+(`@v7`), so a compromised or retagged action lands straight in a release build.
+
+**Evidence.**
+
+```
+$ grep -nE '^signs:|^sboms:|cosign|sbom' .goreleaser.yaml
+(no output)
+$ grep -h 'uses:' .github/workflows/*.yml | sort -u
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+      - uses: goreleaser/goreleaser-action@v7
+```
+
+**Prompt.**
+
+```text
+unpacker verifies cosign signatures as of v0.9.0 but ships its own releases unsigned:
+.goreleaser.yaml emits checksums.txt and nothing else.
+
+Add keyless cosign signing and SBOM generation to .goreleaser.yaml (the signs: and sboms:
+blocks), and give the release workflow the id-token: write permission keyless signing needs.
+Sign the checksums file rather than each archive individually unless there is a reason not to.
+
+Separately, pin every GitHub Action to a full commit SHA rather than a mutable @v7 tag, in both
+ci.yml and release.yml, with the version in a trailing comment so renovate/dependabot can still
+read it. A mutable tag in a release workflow is the supply-chain hole this tool exists to help
+people find.
+
+Verify by cutting a pre-release tag and confirming the release carries a .sig and an SBOM, and
+that `cosign verify-blob --certificate-identity-regexp ... checksums.txt` passes against it.
+Document the verification command in the README so consumers can actually use it.
+```
+
+---
+
+## Tier 3 — gaps and decisions
+
+### D17 · ⛔ open · No notation verification
+
+**What.** v0.9.0 added cosign. The review scoped notation as an explicit follow-up and it has
+not been started. Flux's OCIRepository CRD supports both providers, so a monitor tracking
+Flux-signed artifacts may need it.
+
+**Evidence.** No `notation` anywhere in `internal/` (grep hits are all `annotations`).
+
+**Decide before building.** Notation matters only if something in your estate signs with it. If
+everything is cosign, this stays closed and the ledger should say so rather than carrying a
+permanently open item.
+
+**Prompt.**
+
+```text
+unpacker verifies cosign signatures but not notation ones. Add notation verification alongside
+the existing cosign support, following the shape verify.go already uses: discovery through the
+referrers API, verification gating Unpack, and the outcome recorded in result.json's
+verification object.
+
+Use notation-go with a trust policy and trust store. Add --verify-notation-trust-policy and
+--verify-notation-trust-store, and make them mutually exclusive with the cosign verify flags in
+VerifyConfig.Validate the same way the existing combinations are -- silently ignoring one
+verification mode because another was passed is the failure that function exists to prevent.
+
+Extend the verification object with the provider that was used, so a consumer can tell a cosign
+result from a notation one.
+
+Test against the in-process registry with a notation-signed artifact, mirroring the existing
+cosign tests: a valid signature verifies, an untrusted identity is refused with no image/
+published. Follow TestVerify_RealCosignV3Bundle's example and check in a fixture produced by
+the real notation CLI rather than one written to match the policy.
+```
+
+### D18 · ⏸ open by design · A referrer with no `subject` is skipped, not rejected
+
+**What.** v0.8.0 rejects a referrer whose `subject` names another digest, but a referrer with
+*no* subject is logged and skipped rather than failing the run. Per OCI 1.1 a referrer is
+defined by having a subject, so rejecting would be more correct — the skip exists so that a
+registry whose fallback listing omits the field does not break `--with-referrers`.
+
+**Evidence.** `internal/unpacker/referrers.go:149`, marked in-code:
+
+```go
+// ponytail: skip-and-warn for compatibility; make it a hard error
+// once no real registry is seen doing this.
+```
+
+**New evidence since.** The cosign v3 signature captured in `internal/unpacker/testdata/` was
+attached through the OCI 1.1 fallback tag by a registry with no referrers API, and its manifest
+**did** carry a `subject`. That is one data point in favour of tightening, not yet a policy.
+
+**Prompt.**
+
+```text
+internal/unpacker/referrers.go around line 149 skips a referrer whose manifest has no subject,
+with a ponytail: marker saying to make it a hard error once no real registry is seen omitting
+the field. Per OCI 1.1 a referrer is defined by having a subject, and the cosign bundle captured
+in internal/unpacker/testdata was attached through the fallback tag with a subject present.
+
+Before changing anything, gather evidence rather than reasoning from the spec: check what
+Harbor, ECR, GCR, Docker Hub and a plain registry:2 actually return for a referrers listing,
+including the fallback tag path. Report what you find.
+
+If nothing omits the subject, make it a hard error, delete the ponytail marker, convert
+TestDownloadReferrer_SkipsSubjectlessReferrer into a rejection test, and note the behaviour
+change in the README and CLAUDE.md -- it turns a warning into a failed run, so it belongs in a
+minor release, not a patch.
+
+If something does omit it, leave the skip, update the marker to name that registry, and close
+the question in the ledger so it is not re-derived a third time.
+```
+
+### D19 · ⛔ open · Smaller review leftovers
+
+Five items from the review's P3, none individually worth a section. Confirmed present at
+`1dfa1d6`.
+
+| | Gap | Evidence |
+|---|---|---|
+| a | No `--platform`; an index takes crane's default (linux/amd64) with no way to pick another or fetch all | `grep -c platform cmd/unpacker/main.go` → 0 |
+| b | Everything exits 1; a pipeline cannot branch on not-found vs auth-failed vs verification-failed without parsing stderr | `main.go:19`, single `os.Exit(1)` |
+| c | `result.json` is not written when `Pull` or `Unpack` fails, so a consumer reading the file sees the *previous* run's result | `WriteResult` is only reached on the referrers and verification paths |
+| d | Extracted modes come from the archive, so a `0777` directory or `0000` file is reproduced faithfully; `Perm()` handles the dangerous bits, not the awkward ones | `unpack.go`, `hdr.FileInfo().Mode().Perm()` |
+| e | Alpine base pinned to `3.21`; newer stable branches exist | `Dockerfile:11` |
+
+**Prompt (c — the one with a correctness argument).**
+
+```text
+unpacker writes result.json on the referrers and verification paths but not when Pull or Unpack
+fails, so a consumer that reads the file rather than the exit code sees the *previous* run's
+result and treats a failed run as the last successful one. This is the same class of bug D3
+fixed for the image/ directory.
+
+Write result.json on every terminating path, with an error field naming the stage that failed
+(pull, unpack, verify) and the message. Keep the existing invariant that a successful run's
+result.json is unchanged in shape -- the error field is absent on success, the way verification
+is absent when not requested.
+
+Add a test that a failed pull leaves a result.json describing the failure rather than a stale
+one from an earlier run into the same output directory.
+```
+
+**Prompt (a, b, d, e — batch these only if you want them; each is independent).**
+
+```text
+Four small leftovers in unpacker, from the 2026-08-31 review's P3. Do them as separate commits.
+
+(a) Add --platform (e.g. linux/arm64) for image indexes. crane currently picks its default,
+    linux/amd64, with no way to choose. Also support --platform all to unpack every platform in
+    an index into image/<os>-<arch>/. Test that an index with two platforms unpacks the one
+    asked for, and that the existing default is unchanged when the flag is absent.
+
+(b) Give the CLI structured exit codes so a pipeline can branch without parsing stderr:
+    distinguish not-found, auth-failed, verification-failed and limit-exceeded from a generic
+    failure. Document the table in the README. Keep 0 for success and 1 for anything
+    unclassified.
+
+(d) Clamp extracted file and directory modes with a umask-style mask so an archive cannot
+    reproduce a 0777 directory or a 0000 file. Perm() already drops setuid/setgid/sticky; this
+    is about the merely awkward cases. Do not change the setuid handling or its test.
+
+(e) Bump the Dockerfile's Alpine base from 3.21 to the current stable branch and confirm the
+    integration suite's container half still passes against the rebuilt image.
+```
+
+---
+
 ## What is left
 
-- **D7** — the routing redesign, deliberately not attempted.
-- **D11** — needs you to say which module path is canonical before anything is renamed.
+**Open from the first survey**
 
-## Suggested order (completed in this order)
+- **D7** — the routing redesign. Open by design; partly mitigated by D6. Do it only with the
+  integration suite green in CI, which is D13.
+- **D11** — the module path (`Sifungurux` vs `Sifungurux`). Still blocked on your decision, not
+  on work. It is the reason `go install ...@latest` cannot resolve.
 
-1. **D2** — CI on PRs. Everything else is unverifiable without it.
-2. **D1** — the arm64 umoci binary. It is the only item that is broken for users right now.
-3. **D3** — atomic output, because a partial `image/` is misread silently.
-4. **D8 + D9 + D10** — one mechanical cleanup pass; small, low-risk, makes the test suite easier to extend.
-5. **D5**, **D4** — robustness, in either order.
-6. **D6 (+ D7)** — compression handling and the routing redesign, together and last.
-7. **D11**, **D12** — whenever; both need a decision from you more than they need work.
+**Open from the second survey**
+
+- **D13** — integration suite in CI. Do this first.
+- **D14** — `runUmoci` outside the limit system.
+- **D15** — no timeout, no signal handling.
+- **D16** — unsigned releases, unpinned actions.
+- **D17** — notation. Needs a decision on whether anything in the estate signs with it.
+- **D18** — subjectless referrer; needs registry evidence before tightening.
+- **D19** — five small leftovers; (c) has a real correctness argument, the rest are polish.
+
+## Suggested order
+
+1. **D13** — the integration suite in CI. Everything below is verified by hand until this lands,
+   and it is the deferred half of D2 rather than a new idea.
+2. **D19(c)** — `result.json` on failure. Small, and a stale result read as current is the same
+   silent-misread class as D3.
+3. **D15** — timeout and signals. Cheap, and the failure it prevents is a wedged scheduled job.
+4. **D16** — sign the releases. Mostly workflow work, no code risk, and the credibility argument
+   writes itself now that v0.9.0 verifies signatures.
+5. **D14** — bound the umoci path, with honest wording about what the bound covers.
+6. **D18** — gather registry evidence, then either tighten or close it.
+7. **D11**, **D17** — both need a decision from you more than they need work.
+8. **D7**, **D19(a, b, d, e)** — last, and only with CI green.
