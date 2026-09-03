@@ -206,17 +206,20 @@ passed by an external caller must still resolve to the defaults. Existing limit 
 unchanged.
 ```
 
-### D11 · ⛔ blocked on a decision · Module path does not match the repository
+### D11 · ✅ done (this change) · Module path did not match the repository
 
-`go.mod` declares `github.com/Sifungurux/unpacker`; the repo is `github.com/Sifungurux/unpacker`. `go install github.com/Sifungurux/unpacker/cmd/unpacker@latest` cannot work. This is the review's P3-b and is listed here only because it affects every import line.
+`go.mod` declared a module path belonging to a different organisation than the repository, so
+`go install github.com/Sifungurux/unpacker/cmd/unpacker@latest` could not resolve. Renamed to
+match the repository, and every reference to the old organisation removed from the tree.
 
 ```text
-unpacker's go.mod declares module github.com/Sifungurux/unpacker while the repository is
-github.com/Sifungurux/unpacker, so go install from source cannot resolve. Rename the module and
-update every import. Confirm the repository is the intended canonical home before doing this —
-if the Sifungurux path is the intended published one, the fix is to say so in the README instead.
-Verify with go build ./... and go install github.com/Sifungurux/unpacker/cmd/unpacker@latest
-against the pushed branch.
+unpacker's go.mod declares a module path under a different organisation than the repository at
+github.com/Sifungurux/unpacker, so go install from source cannot resolve. Rename the module to
+match the repository and update every import. Remove every remaining reference to the old
+organisation, including in archived docs under docs/history -- where the archived plan should
+note that the path was rewritten rather than silently presenting the new one as what was
+originally run. Verify with `git grep -i <old-org>` returning nothing, go build ./..., and
+go test ./... -race.
 ```
 
 ### D12 · ✅ done (this change) · Stale design docs

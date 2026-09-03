@@ -5,6 +5,9 @@
 > extraction, referrers support, compression detection and an overhauled auth
 > path, so anything here that reads as a description of current behaviour is
 > probably wrong. See the README and CLAUDE.md for what unpacker does today.
+>
+> The module path shown below has also been rewritten to the current one. The
+> original plan used a different path, which was retired in 2026-09.
 
 # Unpacker Go Rewrite — Implementation Plan
 
