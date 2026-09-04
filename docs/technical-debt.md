@@ -506,7 +506,7 @@ If something does omit it, leave the skip, update the marker to name that regist
 the question in the ledger so it is not re-derived a third time.
 ```
 
-### D19 · ⛔ open · Smaller review leftovers
+### D19 · ✅ done (this change) · Smaller review leftovers
 
 Five items from the review's P3, none individually worth a section. Confirmed present at
 `1dfa1d6`.
@@ -580,16 +580,16 @@ Four small leftovers in unpacker, from the 2026-08-31 review's P3. Do them as se
 - **D16** — unsigned releases, unpinned actions.
 - **D17** — notation. Needs a decision on whether anything in the estate signs with it.
 - **D18** — subjectless referrer; needs registry evidence before tightening.
-- **D19** — five small leftovers; (c) has a real correctness argument, the rest are polish.
+- ~~**D19** — five small leftovers.~~ Done, except that `--platform all` was deliberately not
+  built: it needs several OCI layouts and a different `image/` layout, which is a larger change
+  than the rest of D19 combined. Run once per platform instead.
 
 ## Suggested order
 
-1. **D19(c)** — `result.json` on failure. Small, and a stale result read as current is the same
-   silent-misread class as D3.
-2. **D15** — timeout and signals. Cheap, and the failure it prevents is a wedged scheduled job.
-3. **D16** — sign the releases. Mostly workflow work, no code risk, and the credibility argument
+1. **D15** — timeout and signals. Cheap, and the failure it prevents is a wedged scheduled job.
+2. **D16** — sign the releases. Mostly workflow work, no code risk, and the credibility argument
    writes itself now that v0.9.0 verifies signatures.
-4. **D14** — bound the umoci path, with honest wording about what the bound covers.
-5. **D18** — gather registry evidence, then either tighten or close it.
+3. **D14** — bound the umoci path, with honest wording about what the bound covers.
+4. **D18** — gather registry evidence, then either tighten or close it.
 7. **D11**, **D17** — both need a decision from you more than they need work.
-7. **D7**, **D19(a, b, d, e)** — last, and only with CI green.
+6. **D7** — last, and only with CI green.

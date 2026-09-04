@@ -24,6 +24,18 @@ type Result struct {
 	// Verification is nil when no verify flag was passed. That has to stay
 	// distinguishable from a failed verification: absent means nobody asked.
 	Verification *Verification `json:"verification,omitempty"`
+	// Error is absent on success. Without it a failed run left the previous
+	// run's result.json in place, so a consumer reading the file rather than
+	// the exit code saw stale success -- the same silent misread that atomic
+	// image/ publication fixed for the directory.
+	Error *ResultError `json:"error,omitempty"`
+}
+
+// ResultError names which stage failed, so a consumer can tell a registry
+// problem from a refused signature without parsing the message.
+type ResultError struct {
+	Stage   string `json:"stage"` // "pull", "unpack" or "verify"
+	Message string `json:"message"`
 }
 
 // Referrer is one artifact attached to the pulled image — an SBOM, an in-toto
@@ -75,7 +87,7 @@ func FetchReferrers(ctx context.Context, cfg *Config, subjectDigest string) (*Re
 	}
 
 	if max := cfg.maxReferrers(); len(descs) > max {
-		return nil, fmt.Errorf("registry listed %d referrers for %s, over the limit of %d (--max-referrers)",
+		return nil, limitErrorf("registry listed %d referrers for %s, over the limit of %d (--max-referrers)",
 			len(descs), subjectDigest, max)
 	}
 

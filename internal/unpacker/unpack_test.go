@@ -615,3 +615,65 @@ func TestExtractTar_SkipsLinkAndDeviceEntries(t *testing.T) {
 		t.Errorf("file outside destDir = %q, %v; want it untouched", body, err)
 	}
 }
+
+// Perm() drops the dangerous bits; this covers the merely awkward ones an
+// archive can otherwise reproduce faithfully.
+func TestExtractTar_ClampsAwkwardModes(t *testing.T) {
+	tarPath := makeTarGzEntries(t,
+		tarEntry{name: "world-writable.txt", mode: 0666, body: []byte("x")},
+		tarEntry{name: "unreadable.txt", mode: 0000, body: []byte("y")},
+	)
+	destDir := t.TempDir()
+	if err := ExtractTar(tarPath, destDir, Limits{}); err != nil {
+		t.Fatalf("ExtractTar: %v", err)
+	}
+
+	cases := map[string]struct{ forbidden, required os.FileMode }{
+		"world-writable.txt": {forbidden: 0o022},
+		"unreadable.txt":     {required: 0o400},
+	}
+	for name, want := range cases {
+		info, err := os.Stat(filepath.Join(destDir, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got := info.Mode().Perm()
+		if want.forbidden != 0 && got&want.forbidden != 0 {
+			t.Errorf("%s mode = %04o, want no %04o bits", name, got, want.forbidden)
+		}
+		if want.required != 0 && got&want.required != want.required {
+			t.Errorf("%s mode = %04o, want at least %04o", name, got, want.required)
+		}
+	}
+}
+
+// A 0777 directory in an archive should not produce one on disk.
+func TestExtractTar_ClampsDirectoryModes(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "wide/", Typeflag: tar.TypeDir, Mode: 0777}); err != nil {
+		t.Fatal(err)
+	}
+	for _, closer := range []func() error{tw.Close, gz.Close} {
+		if err := closer(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tarPath := filepath.Join(t.TempDir(), "dir.tar.gz")
+	if err := os.WriteFile(tarPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	if err := ExtractTar(tarPath, destDir, Limits{}); err != nil {
+		t.Fatalf("ExtractTar: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(destDir, "wide"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got&0o022 != 0 {
+		t.Errorf("directory mode = %04o, want no group/world write", got)
+	}
+}

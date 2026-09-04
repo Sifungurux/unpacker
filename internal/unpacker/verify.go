@@ -247,9 +247,9 @@ func Verify(cfg *Config, resolvedDigest string, result *Result) (*Verification, 
 
 	paths := bundlePaths(cfg, result)
 	if len(paths) == 0 {
-		return rec, fmt.Errorf("no %s referrer attached to %s: nothing to verify "+
+		return rec, fmt.Errorf("%w: no %s referrer attached to %s: nothing to verify "+
 			"(cosign's default tag scheme is not consulted — sign with --registry-referrers-mode oci-1-1)",
-			CosignBundleArtifactType, resolvedDigest)
+			ErrVerification, CosignBundleArtifactType, resolvedDigest)
 	}
 
 	var lastErr error
@@ -291,7 +291,7 @@ func Verify(cfg *Config, resolvedDigest string, result *Result) (*Verification, 
 		lastErr = errors.New("no signature satisfied the policy")
 	}
 	rec.Error = lastErr.Error()
-	return rec, lastErr
+	return rec, fmt.Errorf("%w: %w", ErrVerification, lastErr)
 }
 
 // signatureVerifier is trust resolution, observer choice and policy resolved

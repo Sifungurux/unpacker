@@ -15,8 +15,11 @@ import (
 var version = "dev"
 
 func main() {
+	// Distinct codes let a pipeline branch on why a run failed without
+	// parsing stderr, which breaks the first time a message is reworded.
+	// Anything unclassified is still 1.
 	if err := rootCmd().Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(unpacker.ExitCode(err))
 	}
 }
 
@@ -32,6 +35,7 @@ func rootCmd() *cobra.Command {
 	var maxFileBytes int64
 	var maxEntries int
 	var maxReferrers int
+	var platform string
 	var verifyIdentity, verifyIssuer, verifyKey string
 	var verifyTrustedRoot, verifyTUFMirror, verifyTUFRoot string
 
@@ -71,6 +75,7 @@ func rootCmd() *cobra.Command {
 				AllowInsecureCredentials: allowInsecureCredentials,
 				WithReferrers:            withReferrers,
 				MaxReferrers:             maxReferrers,
+				Platform:                 platform,
 				Creds:                    creds,
 				Verify:                   verifyCfg,
 				Limits: unpacker.Limits{
@@ -82,21 +87,39 @@ func rootCmd() *cobra.Command {
 
 			ctx := context.Background()
 
+			result := &unpacker.Result{Image: image, Referrers: []unpacker.Referrer{}}
+
+			// result.json is written on every terminating path, failures
+			// included. A run that dies without writing it leaves the
+			// *previous* run's file in place, and a consumer reading the file
+			// rather than the exit code reads a failure as the last success.
+			fail := func(stage string, cause error) error {
+				result.Error = &unpacker.ResultError{Stage: stage, Message: cause.Error()}
+				if writeErr := unpacker.WriteResult(cfg, result); writeErr != nil {
+					// Report the original failure; mention that the record of
+					// it could not be written, because that is the thing a
+					// consumer will now be missing.
+					return fmt.Errorf("%s: %w (and writing result.json failed: %v)", stage, cause, writeErr)
+				}
+				return fmt.Errorf("%s: %w", stage, cause)
+			}
+
 			resolved, err := unpacker.Pull(ctx, cfg)
 			if err != nil {
-				return fmt.Errorf("pull: %w", err)
+				return fail("pull", err)
 			}
+			result.Digest = resolved
 
 			// Signatures are attached as referrers, so a verify run has to
 			// fetch them whether or not --with-referrers was asked for. That
 			// makes verification imply it: the bundle a run was accepted on is
 			// worth keeping next to the artifact it vouches for.
-			result := &unpacker.Result{Image: image, Digest: resolved, Referrers: []unpacker.Referrer{}}
 			if withReferrers || verifyCfg.Requested() {
-				result, err = unpacker.FetchReferrers(ctx, cfg, resolved)
-				if err != nil {
-					return fmt.Errorf("referrers: %w", err)
+				fetched, refErr := unpacker.FetchReferrers(ctx, cfg, resolved)
+				if refErr != nil {
+					return fail("referrers", refErr)
 				}
+				result = fetched
 			} else if err := unpacker.WriteResult(cfg, result); err != nil {
 				return err
 			}
@@ -107,16 +130,16 @@ func rootCmd() *cobra.Command {
 			if verifyCfg.Requested() {
 				record, verifyErr := unpacker.Verify(cfg, resolved, result)
 				result.Verification = record
+				if verifyErr != nil {
+					return fail("verify", verifyErr)
+				}
 				if writeErr := unpacker.WriteResult(cfg, result); writeErr != nil {
 					return writeErr
-				}
-				if verifyErr != nil {
-					return fmt.Errorf("verify: %w", verifyErr)
 				}
 			}
 
 			if err := unpacker.Unpack(cfg); err != nil {
-				return fmt.Errorf("unpack: %w", err)
+				return fail("unpack", err)
 			}
 
 			return nil
@@ -140,6 +163,8 @@ func rootCmd() *cobra.Command {
 		"Maximum number of entries in an archive")
 	cmd.Flags().IntVar(&maxReferrers, "max-referrers", unpacker.DefaultMaxReferrers,
 		"Maximum number of referrers to download for one image")
+	cmd.Flags().StringVar(&platform, "platform", "",
+		"Platform to select from an image index, e.g. linux/arm64 (default: crane's, linux/amd64)")
 	cmd.Flags().StringVar(&verifyIdentity, "verify-cosign-identity", "",
 		"Verify a cosign signature keylessly: regex the Fulcio certificate SAN must match")
 	cmd.Flags().StringVar(&verifyIssuer, "verify-cosign-oidc-issuer", "",

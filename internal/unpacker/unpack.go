@@ -29,8 +29,12 @@ type Config struct {
 	AllowInsecureCredentials bool
 	WithReferrers            bool
 	MaxReferrers             int
-	Creds                    *Credentials
-	Verify                   VerifyConfig
+	// Platform selects one entry from an image index, e.g. "linux/arm64".
+	// Empty means crane's default. It has no meaning for a bare OCI artifact,
+	// which has no platform, so Pull warns rather than failing there.
+	Platform string
+	Creds    *Credentials
+	Verify   VerifyConfig
 	Limits
 }
 
@@ -334,7 +338,7 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 
 		entries++
 		if entries > lim.MaxEntries {
-			return total, fmt.Errorf("archive has more than %d entries (--max-entries)", lim.MaxEntries)
+			return total, limitErrorf("archive has more than %d entries (--max-entries)", lim.MaxEntries)
 		}
 
 		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
@@ -347,8 +351,9 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 		}
 
 		// Perm() keeps only the 0777 bits, dropping setuid/setgid/sticky:
-		// an archive must not be able to plant a privileged binary.
-		mode := hdr.FileInfo().Mode().Perm()
+		// an archive must not be able to plant a privileged binary. clampMode
+		// then handles the merely awkward cases Perm() has no opinion about.
+		mode := clampMode(hdr.FileInfo().Mode().Perm(), hdr.Typeflag == tar.TypeDir)
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -388,10 +393,10 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 			}
 			switch {
 			case n > lim.MaxFileBytes:
-				return total, fmt.Errorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
+				return total, limitErrorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
 					hdr.Name, lim.MaxFileBytes)
 			case total+n > lim.MaxTotalBytes:
-				return total, fmt.Errorf("archive expands past the %d byte total limit (--max-total-bytes)",
+				return total, limitErrorf("archive expands past the %d byte total limit (--max-total-bytes)",
 					lim.MaxTotalBytes)
 			}
 			total += n
@@ -420,6 +425,28 @@ func extractTar(tarPath, destDir string, lim Limits) (int64, error) {
 			totalSkipped(skipped), describeSkipped(skipped))
 	}
 	return total, nil
+}
+
+// Modes an extracted entry may take. The archive chooses within these, so a
+// hostile or merely careless one cannot produce a world-writable directory or
+// a file its owner cannot read. This is about the awkward cases; the dangerous
+// ones (setuid, setgid, sticky) are already gone by the time this is called.
+const (
+	// Nothing extracted is group- or world-writable. 0022 is the conventional
+	// umask and the reason 0777 directories are a surprise when they appear.
+	extractUmask = 0o022
+	// Owner can always read a file and traverse a directory it owns, so a
+	// 0000 entry does not produce a tree that cannot be read back.
+	minFileMode = 0o400
+	minDirMode  = 0o700
+)
+
+func clampMode(mode os.FileMode, isDir bool) os.FileMode {
+	mode &^= extractUmask
+	if isDir {
+		return mode | minDirMode
+	}
+	return mode | minFileMode
 }
 
 // tar type flags carry no names in archive/tar, and a bare byte in a log line
@@ -486,7 +513,7 @@ func CopyFiles(srcDir, destDir string, lim Limits) error {
 		}
 		copied++
 		if copied > lim.MaxEntries {
-			return fmt.Errorf("more than %d files to copy (--max-entries)", lim.MaxEntries)
+			return limitErrorf("more than %d files to copy (--max-entries)", lim.MaxEntries)
 		}
 
 		src, err := os.Open(filepath.Join(srcDir, entry.Name()))
@@ -519,10 +546,10 @@ func CopyFiles(srcDir, destDir string, lim Limits) error {
 		}
 		switch {
 		case n > lim.MaxFileBytes:
-			return fmt.Errorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
+			return limitErrorf("file %s exceeds the %d byte limit for a single file (--max-file-bytes)",
 				entry.Name(), lim.MaxFileBytes)
 		case total+n > lim.MaxTotalBytes:
-			return fmt.Errorf("copied files expand past the %d byte total limit (--max-total-bytes)",
+			return limitErrorf("copied files expand past the %d byte total limit (--max-total-bytes)",
 				lim.MaxTotalBytes)
 		}
 		total += n

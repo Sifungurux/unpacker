@@ -372,3 +372,65 @@ func TestPull_CraneRejectsOversizedLayerBeforeWriting(t *testing.T) {
 		t.Errorf("blobs/ exists; want nothing written for a rejected pull")
 	}
 }
+
+// An index resolved without --platform takes crane's default. That is fine as
+// a default and wrong as the only option: a monitor on arm64 would review the
+// amd64 image and nothing in the output would say so.
+func TestPull_PlatformSelectsFromIndex(t *testing.T) {
+	addr := startRegistry(t, "")
+	image := pushOCIIndex(t, addr, "test/platformselect")
+
+	read := func(platform string) string {
+		t.Helper()
+		outputDir := t.TempDir()
+		cfg := &Config{
+			Image:     image,
+			OutputDir: outputDir,
+			Insecure:  true,
+			Creds:     &Credentials{Public: true},
+			Platform:  platform,
+		}
+		if _, err := Pull(context.Background(), cfg); err != nil {
+			t.Fatalf("Pull(%q): %v", platform, err)
+		}
+		// The layer blob is the only thing that differs between the two
+		// platforms, so its content is what proves which one was chosen.
+		var found string
+		blobs := filepath.Join(outputDir, "tmp", "blobs", "sha256")
+		entries, err := os.ReadDir(blobs)
+		if err != nil {
+			t.Fatalf("read blobs: %v", err)
+		}
+		for _, e := range entries {
+			body, err := os.ReadFile(filepath.Join(blobs, e.Name()))
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(body), "content") {
+				found = string(body)
+			}
+		}
+		return found
+	}
+
+	if got := read("linux/arm64"); !strings.Contains(got, "arm64") {
+		t.Errorf("--platform linux/arm64 pulled %q, want the arm64 image", got)
+	}
+	if got := read("linux/amd64"); !strings.Contains(got, "amd64") {
+		t.Errorf("--platform linux/amd64 pulled %q, want the amd64 image", got)
+	}
+}
+
+func TestPull_RejectsMalformedPlatform(t *testing.T) {
+	addr := startRegistry(t, "")
+	cfg := &Config{
+		Image:     pushOCIIndex(t, addr, "test/badplatform"),
+		OutputDir: t.TempDir(),
+		Insecure:  true,
+		Creds:     &Credentials{Public: true},
+		Platform:  "not a platform!!",
+	}
+	if _, err := Pull(context.Background(), cfg); err == nil {
+		t.Fatal("expected a malformed --platform to be rejected")
+	}
+}
