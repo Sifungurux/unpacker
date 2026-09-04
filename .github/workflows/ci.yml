@@ -35,3 +35,62 @@ jobs:
       # client is on the reachable path (see CLAUDE.md), so a credential
       # CVE there is not free for us.
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # The media-type half of scripts/test-integration.sh. It covers the routing
+  # and media-type gating that unit tests cannot reach -- real Flux and Helm
+  # artifacts pushed to a local registry, then unpacked -- and until now it had
+  # only ever run on someone's laptop.
+  #
+  # The container half is deliberately not here: it needs a built image and a
+  # daemon, which makes it the slower and flakier of the two. That is a
+  # decision, not an oversight -- revisit it if this job proves stable.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Pinned by version and verified by hash. These are downloaded into a CI
+      # runner that then builds and runs our code, so "curl | sh" from a
+      # release page is exactly the supply-chain shape this tool exists to
+      # help people audit.
+      - name: Install flux, helm, oras and umoci
+        env:
+          FLUX_VERSION: 2.9.5
+          HELM_VERSION: 4.2.4
+          ORAS_VERSION: 1.3.4
+          UMOCI_VERSION: 0.6.0
+          FLUX_SHA256: b853df82adfd7736f580692f9f734473d571606307139f8fd20c2a80dd1ff473
+          HELM_SHA256: c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3
+          ORAS_SHA256: f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454
+          # Same binary and same hash the Dockerfile pins; keep them in step.
+          UMOCI_SHA256: b51c267ec394499e42c6fde47f240b7b7dba57ea49df0b5acd304378b82a3b71
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+
+          fetch() { # url  sha256  output
+            curl -fsSL -o "$3" "$1"
+            echo "$2  $3" | sha256sum -c -
+          }
+
+          fetch "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" "$FLUX_SHA256" flux.tgz
+          fetch "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" "$HELM_SHA256" helm.tgz
+          fetch "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" "$ORAS_SHA256" oras.tgz
+          fetch "https://github.com/opencontainers/umoci/releases/download/v${UMOCI_VERSION}/umoci.linux.amd64" "$UMOCI_SHA256" umoci
+
+          tar xzf flux.tgz flux
+          tar xzf helm.tgz --strip-components=1 linux-amd64/helm
+          tar xzf oras.tgz oras
+          sudo install -m 755 flux helm oras umoci /usr/local/bin/
+
+          flux --version && helm version --short && oras version && umoci --version
+
+      # SUITES=mediatype makes the suite's prerequisites mandatory: without it
+      # a missing tool would skip, and a skipped suite is indistinguishable
+      # from a passing one in a green tick.
+      - name: Integration suite (media-type)
+        run: SUITES=mediatype ./scripts/test-integration.sh

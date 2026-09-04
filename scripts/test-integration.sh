@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Integration smoke test for unpacker.
 #
-# Two suites, each skipped (not failed) when its prerequisites are missing:
+# Two suites. By default each is skipped (not failed) when its prerequisites are
+# missing; naming one with SUITES= makes its prerequisites mandatory instead.
 #
 #   Container suite  — needs docker or podman plus the unpacker:dev image.
 #                      Covers the published container end to end.
@@ -14,12 +15,17 @@
 #   IMAGE=unpacker:latest ./scripts/test-integration.sh
 #   REGISTRY_PORT=5200 ./scripts/test-integration.sh
 #   ENGINE=podman ./scripts/test-integration.sh
+#   SUITES=mediatype ./scripts/test-integration.sh   # and fail if it cannot run
 
 set -euo pipefail
 
 IMAGE="${IMAGE:-unpacker:dev}"
 REGISTRY_PORT="${REGISTRY_PORT:-5111}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# all | container | mediatype. Naming one makes its prerequisites mandatory
+# rather than a reason to skip — see the dispatcher at the bottom.
+SUITES="${SUITES:-all}"
 
 # Engine the caller asked for, if any; the one actually in use is resolved below.
 ENGINE_REQUESTED="${ENGINE:-}"
@@ -402,22 +408,42 @@ pick_engine() {
 
 ran_any=0
 
-if pick_engine; then
-  echo "Container engine: $ENGINE"
-  container_suite
-  ran_any=1
-elif [ -n "$ENGINE_REQUESTED" ]; then
-  skip "Container suite — '$ENGINE_REQUESTED' is not usable (is it installed and running?)"
-else
-  skip "Container suite — no usable container engine (start Docker or podman)"
+# Naming a suite makes its prerequisites mandatory. Skipping is the right
+# default on a laptop, where you may have podman but not flux; it is wrong in
+# CI, where a skipped suite and a passing one look identical in a green tick.
+# So: SUITES=mediatype means "run that suite or fail trying".
+want() { [ "$SUITES" = "all" ] || [ "$SUITES" = "$1" ]; }
+required() { [ "$SUITES" != "all" ]; }
+
+case "$SUITES" in
+  all|container|mediatype) ;;
+  *) fail "SUITES must be one of: all, container, mediatype (got '$SUITES')" ;;
+esac
+
+if want container; then
+  if pick_engine; then
+    echo "Container engine: $ENGINE"
+    container_suite
+    ran_any=1
+  elif required; then
+    fail "Container suite — no usable container engine, and SUITES=$SUITES requires it"
+  elif [ -n "$ENGINE_REQUESTED" ]; then
+    skip "Container suite — '$ENGINE_REQUESTED' is not usable (is it installed and running?)"
+  else
+    skip "Container suite — no usable container engine (start Docker or podman)"
+  fi
 fi
 
-missing=$(missing_tools go flux helm umoci oras curl)
-if [ -n "$missing" ]; then
-  skip "Media-type suite — missing:$missing"
-else
-  mediatype_suite
-  ran_any=1
+if want mediatype; then
+  missing=$(missing_tools go flux helm umoci oras curl)
+  if [ -z "$missing" ]; then
+    mediatype_suite
+    ran_any=1
+  elif required; then
+    fail "Media-type suite — missing:$missing, and SUITES=$SUITES requires it"
+  else
+    skip "Media-type suite — missing:$missing"
+  fi
 fi
 
 if [ "$ran_any" -eq 0 ]; then
