@@ -8,7 +8,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o unpacker ./cmd/unpacker
 
-FROM alpine:3.21
+FROM alpine:3.22
 ARG TARGETARCH
 ARG UMOCI_VERSION=0.6.0
 # Hashes are pinned here rather than taken from the checksum file published

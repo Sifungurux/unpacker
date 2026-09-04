@@ -26,6 +26,7 @@ Options:
       --max-file-bytes   int    Max bytes written for one file (default: 512 MiB)
       --max-entries      int    Max entries in an archive (default: 100000)
       --max-referrers    int    Max referrers to download for one image (default: 100)
+      --platform         string Platform to select from an image index, e.g. linux/arm64
       --verify-cosign-identity  string  Keyless: regex the Fulcio cert SAN must match
       --verify-cosign-oidc-issuer url   Keyless: required with the above
       --verify-cosign-key       path    Key-based: a cosign public key
@@ -361,3 +362,40 @@ if you need that gap closed.
 
 A trusted root with neither a Rekor log nor a timestamp authority is refused
 outright: nothing would attest to the signature at all.
+
+## Exit codes
+
+A scheduled run can branch on why it failed without parsing stderr.
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | anything not classified below |
+| 2 | repository, tag or digest not found |
+| 3 | credentials missing, wrong, or insufficient |
+| 4 | signature verification was requested and refused |
+| 5 | a `--max-*` limit was exceeded |
+
+`result.json` is written on **every** terminating path, failures included, with
+an `error` object naming the stage (`pull`, `referrers`, `verify`, `unpack`)
+and the message. Its absence on a successful run is the only difference in
+shape. Without this a failed run left the previous run's file in place, and a
+consumer reading the file rather than the exit code read a failure as the last
+success.
+
+## Extracted file modes
+
+Modes come from the archive, so unpacker constrains them: setuid, setgid and
+sticky are dropped, group- and world-write are masked off, and an entry is
+always at least owner-readable — a `0000` file in an archive does not produce a
+tree you cannot read back.
+
+## Platform selection
+
+`--platform linux/arm64` picks one entry from an image index. Without it an
+index resolves to crane's default, `linux/amd64`, with nothing in the output
+saying a choice was made.
+
+Selecting **all** platforms at once is not supported: it would mean several OCI
+layouts and a different `image/` layout, which is a larger change than the flag
+itself. Run unpacker once per platform into separate output directories.

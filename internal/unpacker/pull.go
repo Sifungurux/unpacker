@@ -130,11 +130,11 @@ func (b *downloadBudget) charge(desc ocispec.Descriptor) error {
 		return nil
 	}
 	if desc.Size > b.maxFile {
-		return fmt.Errorf("blob %s declares %d bytes, over the %d byte limit for a single file (--max-file-bytes)",
+		return limitErrorf("blob %s declares %d bytes, over the %d byte limit for a single file (--max-file-bytes)",
 			desc.Digest, desc.Size, b.maxFile)
 	}
 	if desc.Size > b.remaining {
-		return fmt.Errorf("blob %s declares %d bytes, past the %d byte total limit for this pull (--max-total-bytes)",
+		return limitErrorf("blob %s declares %d bytes, past the %d byte total limit for this pull (--max-total-bytes)",
 			desc.Digest, desc.Size, b.remaining)
 	}
 	b.remaining -= desc.Size
@@ -340,6 +340,17 @@ func pullWithCrane(ctx context.Context, cfg *Config) (string, error) {
 	tmpDir := filepath.Join(cfg.OutputDir, "tmp")
 
 	opts := []crane.Option{crane.WithContext(ctx)}
+
+	// Without this an image index resolves to crane's default, linux/amd64,
+	// with nothing in the output saying a choice was made. A monitor running
+	// on arm64 would silently review the wrong image.
+	if cfg.Platform != "" {
+		plat, err := v1.ParsePlatform(cfg.Platform)
+		if err != nil {
+			return "", fmt.Errorf("parse --platform %q: %w", cfg.Platform, err)
+		}
+		opts = append(opts, crane.WithPlatform(plat))
+	}
 
 	if cfg.Insecure {
 		// Same guard as newOrasRepository, for the same reason: an
