@@ -255,7 +255,7 @@ that work which neither review covers. Every item was confirmed against the code
 
 ## Tier 1 — ships broken, or hides breakage
 
-### D13 · ⛔ open · The integration suite has never run in CI
+### D13 · ✅ done (this change) · The integration suite has never run in CI
 
 **What.** D2 added `ci.yml` with unit tests, `vet`, `gofmt` and (since v0.8.0) `govulncheck`,
 and its prompt said in as many words: *"Do not add the integration suite in this change."* That
@@ -572,7 +572,9 @@ Four small leftovers in unpacker, from the 2026-08-31 review's P3. Do them as se
 
 **Open from the second survey**
 
-- **D13** — integration suite in CI. Do this first.
+- ~~**D13** — integration suite in CI.~~ Done: the media-type half runs on every PR, with
+  `SUITES=mediatype` making its prerequisites mandatory rather than a reason to skip. The
+  container half remains out, deliberately.
 - **D14** — `runUmoci` outside the limit system.
 - **D15** — no timeout, no signal handling.
 - **D16** — unsigned releases, unpinned actions.
@@ -582,14 +584,12 @@ Four small leftovers in unpacker, from the 2026-08-31 review's P3. Do them as se
 
 ## Suggested order
 
-1. **D13** — the integration suite in CI. Everything below is verified by hand until this lands,
-   and it is the deferred half of D2 rather than a new idea.
-2. **D19(c)** — `result.json` on failure. Small, and a stale result read as current is the same
+1. **D19(c)** — `result.json` on failure. Small, and a stale result read as current is the same
    silent-misread class as D3.
-3. **D15** — timeout and signals. Cheap, and the failure it prevents is a wedged scheduled job.
-4. **D16** — sign the releases. Mostly workflow work, no code risk, and the credibility argument
+2. **D15** — timeout and signals. Cheap, and the failure it prevents is a wedged scheduled job.
+3. **D16** — sign the releases. Mostly workflow work, no code risk, and the credibility argument
    writes itself now that v0.9.0 verifies signatures.
-5. **D14** — bound the umoci path, with honest wording about what the bound covers.
-6. **D18** — gather registry evidence, then either tighten or close it.
+4. **D14** — bound the umoci path, with honest wording about what the bound covers.
+5. **D18** — gather registry evidence, then either tighten or close it.
 7. **D11**, **D17** — both need a decision from you more than they need work.
-8. **D7**, **D19(a, b, d, e)** — last, and only with CI green.
+7. **D7**, **D19(a, b, d, e)** — last, and only with CI green.
